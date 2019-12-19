@@ -157,7 +157,7 @@ def modeler_func(Obsdata, model_init, model_prior,
                    minimizer_func='scipy.optimize.minimize',
                    minimizer_kwargs=None,
                    bounds=None, use_bounds=False,
-                   test_gradient=False, **kwargs):
+                   test_gradient=False, verbose_callback=False, **kwargs):
 
     """Fit a specified model. 
 
@@ -199,6 +199,7 @@ def modeler_func(Obsdata, model_init, model_prior,
         minimizer_kwargs = {}
 
     show_updates = kwargs.get('show_updates',True)
+    update_interval = kwargs.get('update_interval',1)
 
     # Make sure data and regularizer options are ok
     if not d1 and not d2:
@@ -285,6 +286,9 @@ def modeler_func(Obsdata, model_init, model_prior,
 
     # Define the objective function and gradient
     def objfunc(params):
+        if verbose_callback:
+            plotcur(params)
+
         set_params(params)
         datterm  = alpha_d1 * (chisq1() - 1) + alpha_d2 * (chisq2() - 1) + alpha_d3 * (chisq3() - 1)
         priterm  = prior(params)
@@ -320,7 +324,7 @@ def modeler_func(Obsdata, model_init, model_prior,
     nit = 0
     def plotcur(params_step, *args):
         global nit
-        if show_updates:
+        if show_updates and (nit % update_interval == 0):
             print('Params:',transform_params(params_step))
             chi2_1 = chisq1()
             chi2_2 = chisq2()
@@ -347,20 +351,6 @@ def modeler_func(Obsdata, model_init, model_prior,
             else:
                 print('Parameter ' + param_map[j][1] + ' not understood!')  
 
-    # Print stats
-    print("Initial Chi^2_1: %f Chi^2_2: %f Chi^2_3: %f" % (chisq1(), chisq2(), chisq3()))
-    print("Initial Objective Function: %f" % (objfunc(param_init)))
-
-    if d1 in DATATERMS:
-        print("Total Data 1: ", (len(data1)))
-    if d2 in DATATERMS:
-        print("Total Data 2: ", (len(data2)))
-    if d3 in DATATERMS:
-        print("Total Data 3: ", (len(data3)))
-
-    print("Total Fitted Real Parameters #: ",(len(param_init)))
-    plotcur(param_init)
-
     # Define bounds
     if bounds is None:
         bounds = []
@@ -378,6 +368,20 @@ def modeler_func(Obsdata, model_init, model_prior,
             print('Bounds are required for ' + minimizer_func + '!')
         else:
             bounds = None
+
+    # Print stats
+    print("Initial Chi^2_1: %f Chi^2_2: %f Chi^2_3: %f" % (chisq1(), chisq2(), chisq3()))
+    print("Initial Objective Function: %f" % (objfunc(param_init)))
+
+    if d1 in DATATERMS:
+        print("Total Data 1: ", (len(data1)))
+    if d2 in DATATERMS:
+        print("Total Data 2: ", (len(data2)))
+    if d3 in DATATERMS:
+        print("Total Data 3: ", (len(data3)))
+
+    print("Total Fitted Real Parameters #: ",(len(param_init)))
+    plotcur(param_init)
 
     # Minimize
     tstart = time.time()
