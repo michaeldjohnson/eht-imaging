@@ -318,7 +318,7 @@ def modeler_func(Obsdata, model_init, model_prior,
     # Define plotting function for each iteration
     global nit
     nit = 0
-    def plotcur(params_step):
+    def plotcur(params_step, *args):
         global nit
         if show_updates:
             print('Params:',transform_params(params_step))
@@ -402,7 +402,7 @@ def modeler_func(Obsdata, model_init, model_prior,
         for key in minimizer_kwargs.keys():
             min_kwargs[key] = minimizer_kwargs[key]
 
-        res = opt.dual_annealing(objfunc, x0=param_init, bounds=bounds, **min_kwargs) #callback=plotcur, 
+        res = opt.dual_annealing(objfunc, x0=param_init, bounds=bounds, callback=plotcur, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.basinhopping':
         # def basinhopping(func, x0, niter=100, T=1.0, stepsize=0.5,
         #         minimizer_kwargs=None, take_step=None, accept_test=None,
