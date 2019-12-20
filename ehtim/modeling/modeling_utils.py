@@ -403,9 +403,17 @@ def modeler_func(Obsdata, model_init, model_prior,
     elif minimizer_func == 'scipy.optimize.dual_annealing':
         # scipy.optimize.dual_annealing(func, bounds, args=(), maxiter=1000, local_search_options={}, initial_temp=5230.0, restart_temp_ratio=2e-05, visit=2.62, accept=-5.0, maxfun=10000000.0, seed=None, no_local_search=False, callback=None, x0=None)
         min_kwargs = {}
-        for key in minimizer_kwargs.keys():
-            min_kwargs[key] = minimizer_kwargs[key]
+        min_kwargs['local_search_options'] = {'jac':objgrad,'method':'L-BFGS-B','options':{'maxiter':MAXIT, 'ftol':STOP, 'maxcor':NHIST,'gtol':STOP,'maxls':MAXLS}}
 
+        if 'local_search_options' in minimizer_kwargs.keys():
+            for key in minimizer_kwargs['local_search_options'].keys():
+                min_kwargs['local_search_options'][key] = minimizer_kwargs['local_search_options'][key]
+
+        for key in minimizer_kwargs.keys():
+            if key in ['local_search_options']:
+                continue
+            min_kwargs[key] = minimizer_kwargs[key]
+      
         res = opt.dual_annealing(objfunc, x0=param_init, bounds=bounds, callback=plotcur, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.basinhopping':
         # def basinhopping(func, x0, niter=100, T=1.0, stepsize=0.5,
