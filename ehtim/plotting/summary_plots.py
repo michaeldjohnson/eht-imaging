@@ -177,8 +177,11 @@ def imgsum(im_or_mov, obs, obs_uncal, outname, outdir='.', title='imgsum', comme
         #ax.axis('off')
         ax.set_yticks([])
         ax.set_xticks([])
-
-        flux = im_display.total_flux()
+        
+        if hasattr(im_or_mov,'total_flux'):
+            flux = im_or_mov.total_flux()
+        else:
+            flux = im_display.total_flux()
 
         # SNR ordering
         #obs.reorder_tarr_snr()
