@@ -154,6 +154,7 @@ def transform_grad_param(x, x_prior):
 def modeler_func(Obsdata, model_init, model_prior,
                    d1='vis', d2=False, d3=False,
                    alpha_d1=100, alpha_d2=100, alpha_d3=100,
+                   fit_gains=False,gain_init=None,gain_prior=None,
                    minimizer_func='scipy.optimize.minimize',
                    minimizer_kwargs=None,
                    bounds=None, use_bounds=False,
@@ -232,27 +233,87 @@ def modeler_func(Obsdata, model_init, model_prior,
     (data2, sigma2, uv2) = chisqdata(Obsdata, d2)
     (data3, sigma3, uv3) = chisqdata(Obsdata, d3)
 
+    # Determine the mapping between solution gains and the input visibilities
+    # NOTE: THIS MUST BE FIXED TO MATCH FLAGGING AND SYSTEMATIC NOISE STUFF
+    if fit_gains:
+        if gain_prior is None:
+            print('No gain prior specified. Defaulting to an exponential prior with standard deviation of 0.1')
+            gain_prior = {}
+            for site in Obsdata.tarr['site']:
+                gain_prior[site] = {'prior_type':'exponential','std':0.1} 
+
+        # Need all unique (time,site) pairs
+        # Note: This is an extremely slow and clunky way to do this. 
+        gain_list = []
+        for j in range(len(Obsdata.data)):
+            if ([Obsdata.data[j]['time'],Obsdata.data[j]['t1']] not in gain_list) and (gain_prior[Obsdata.data[j]['t1']]['prior_type'] != 'fixed'):
+                gain_list.append([Obsdata.data[j]['time'],Obsdata.data[j]['t1']])
+            if ([Obsdata.data[j]['time'],Obsdata.data[j]['t2']] not in gain_list) and (gain_prior[Obsdata.data[j]['t2']]['prior_type'] != 'fixed'):
+                gain_list.append([Obsdata.data[j]['time'],Obsdata.data[j]['t2']])
+
+        # Now determine the appropriate mapping; use the final index for all ignored gains, which default to 1
+        def gain_index(j, tnum):
+            try:
+                return gain_list.index([Obsdata.data[j]['time'],Obsdata.data[j][tnum]])
+            except:
+                return len(gain_list)
+
+        gains_t1 = [gain_index(j, 't1') for j in range(len(Obsdata.data))]
+        gains_t2 = [gain_index(j, 't2') for j in range(len(Obsdata.data))]        
+        n_gains = len(gain_list)
+        print('Solving for %d gain amplitudes' % n_gains)
+    else:
+        n_gains = 0
+        gain_list = []
+        gains_t1 = None
+        gains_t2 = None
+
+    def prior_gain(gains):
+        if fit_gains:
+            return np.sum([np.log(prior_func(gains[j], gain_prior[gain_list[j][1]])) for j in range(len(gains))])
+        else:
+            return 0.0
+
+    def prior_gain_grad(gains):
+        f  = np.array([prior_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
+        df = np.array([prior_grad_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
+        return df/f
+
+    # Determine multiplicative factor for the gains (amplitude only)
+    def gain_factor(dtype,gains,gains_t1,gains_t2):
+        if not fit_gains:
+            return 1
+
+        if dtype in ['amp','vis']:    
+            gains_wzero = np.append(gains,0.0)
+            return (1.0 + gains_wzero[gains_t1])*(1.0 + gains_wzero[gains_t2])
+        else:
+            return 1
+
     # Define the chi^2 and chi^2 gradient
-    def chisq1():
-        return chisq(trial_model, uv1, data1, sigma1, d1)
+    def chisq1(gains,gains_t1,gains_t2):
+        gain = gain_factor(d1,gains,gains_t1,gains_t2)
+        return chisq(trial_model, uv1, gain*data1, gain*sigma1, d1)
 
-    def chisq1grad():
-        c = chisqgrad(trial_model, uv1, data1, sigma1, d1, param_mask)
-        return c
+    def chisq1grad(gains,gains_t1,gains_t2):
+        gain = gain_factor(d1,gains,gains_t1,gains_t2)
+        return chisqgrad(trial_model, uv1, gain*data1, gain*sigma1, d1, param_mask, fit_gains, gains, gains_t1, gains_t2)
 
-    def chisq2():
-        return chisq(trial_model, uv2, data2, sigma2, d2)
+    def chisq2(gains,gains_t1,gains_t2):
+        gain = gain_factor(d2,gains,gains_t1,gains_t2)
+        return chisq(trial_model, uv2, gain*data2, gain*sigma2, d2)
 
-    def chisq2grad():
-        c = chisqgrad(trial_model, uv2, data2, sigma2, d2, param_mask)
-        return c
+    def chisq2grad(gains,gains_t1,gains_t2):
+        gain = gain_factor(d2,gains,gains_t1,gains_t2)
+        return chisqgrad(trial_model, uv2, gain*data2, gain*sigma2, d2, param_mask, fit_gains, gains, gains_t1, gains_t2)
 
-    def chisq3():
-        return chisq(trial_model, uv3, data3, sigma3, d3)
+    def chisq3(gains,gains_t1,gains_t2):
+        gain = gain_factor(d3,gains,gains_t1,gains_t2)
+        return chisq(trial_model, uv3, gain*data3, gain*sigma3, d3)
 
-    def chisq3grad():
-        c = chisqgrad(trial_model, uv3, data3, sigma3, d3, param_mask)
-        return c
+    def chisq3grad(gains,gains_t1,gains_t2):
+        gain = gain_factor(d3,gains,gains_t1,gains_t2)
+        return chisqgrad(trial_model, uv3, gain*data3, gain*sigma3, d3, param_mask, fit_gains, gains, gains_t1, gains_t2)
 
     def transform_params(params, inverse=True):
         return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
@@ -289,20 +350,22 @@ def modeler_func(Obsdata, model_init, model_prior,
         if verbose_callback:
             plotcur(params)
 
-        set_params(params)
-        datterm  = alpha_d1 * (chisq1() - 1) + alpha_d2 * (chisq2() - 1) + alpha_d3 * (chisq3() - 1)
-        priterm  = prior(params)
+        set_params(params[:n_params])
+        gains = params[n_params:]
+        datterm  = alpha_d1 * (chisq1(gains,gains_t1,gains_t2) - 1) + alpha_d2 * (chisq2(gains,gains_t1,gains_t2) - 1) + alpha_d3 * (chisq3(gains,gains_t1,gains_t2) - 1)
+        priterm  = prior(params[:n_params]) + prior_gain(params[n_params:])
 
         return datterm - priterm
 
     def objgrad(params):
-        set_params(params)
-        datterm  = alpha_d1 * chisq1grad() + alpha_d2 * chisq2grad() + alpha_d3 * chisq3grad()
-        priterm  = prior_grad(params)
+        set_params(params[:n_params])
+        gains = params[n_params:]
+        datterm  = alpha_d1 * chisq1grad(gains,gains_t1,gains_t2) + alpha_d2 * chisq2grad(gains,gains_t1,gains_t2) + alpha_d3 * chisq3grad(gains,gains_t1,gains_t2)
+        priterm  = np.concatenate([prior_grad(params[:n_params]), prior_gain_grad(params[n_params:])])
 
         grad = datterm - priterm
 
-        for j in range(len(params)):
+        for j in range(n_params):
             grad[j] *= param_map[j][2] * transform_grad_param(params[j], model_prior[param_map[j][0]][param_map[j][1]])
 
         if test_gradient:
@@ -315,7 +378,10 @@ def modeler_func(Obsdata, model_init, model_prior,
                 params2[j] += dx                
                 f2 = objfunc(params2)
                 grad_numeric[j] = (f2 - f1)/dx
-                print('\nNumeric Gradient Check: ',param_map[j][0],param_map[j][1],grad[j],grad_numeric[j])
+                if j < n_params:
+                    print('\nNumeric Gradient Check: ',param_map[j][0],param_map[j][1],grad[j],grad_numeric[j])
+                else:
+                    print('\nNumeric Gradient Check: ',grad[j],grad_numeric[j])
 
         return grad
 
@@ -325,12 +391,13 @@ def modeler_func(Obsdata, model_init, model_prior,
     def plotcur(params_step, *args):
         global nit
         if show_updates and (nit % update_interval == 0):
-            print('Params:',transform_params(params_step))
-            chi2_1 = chisq1()
-            chi2_2 = chisq2()
-            chi2_3 = chisq3()
+            print('Params:',transform_params(params_step[:n_params]))
+            gains = params_step[n_params:]
+            chi2_1 = chisq1(gains,gains_t1,gains_t2)
+            chi2_2 = chisq2(gains,gains_t1,gains_t2)
+            chi2_3 = chisq3(gains,gains_t1,gains_t2)
             #plot_i(im_step, Prior, nit, {d1:chi2_1, d2:chi2_2, d3:chi2_3}, pol=pol)   # could sample model and plot it
-            print("i: %d chi2_1: %0.2f chi2_2: %0.2f chi2_3: %0.2f prior: %0.2f" % (nit, chi2_1, chi2_2, chi2_3, prior(params_step)))
+            print("i: %d chi2_1: %0.2f chi2_2: %0.2f chi2_3: %0.2f prior: %0.2f" % (nit, chi2_1, chi2_2, chi2_3, prior(params_step[:n_params])))
         nit += 1
 
     # Initial parameters
@@ -350,6 +417,7 @@ def modeler_func(Obsdata, model_init, model_prior,
                 param_init.append(transform_param(np.imag(model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
             else:
                 print('Parameter ' + param_map[j][1] + ' not understood!')  
+        n_params = len(param_init)
 
     # Define bounds
     if bounds is None:
@@ -361,6 +429,9 @@ def modeler_func(Obsdata, model_init, model_prior,
                 pb[0] = transform_param(pb[0]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
                 pb[1] = transform_param(pb[1]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
             bounds.append(pb)
+        for j in range(n_gains):
+            bounds.append([0, 100])
+
         bounds = np.array(bounds)
 
     if use_bounds == False:
@@ -369,8 +440,16 @@ def modeler_func(Obsdata, model_init, model_prior,
         else:
             bounds = None
 
+    if fit_gains:
+        if gain_init is None:
+            param_init += list(np.zeros(n_gains))
+        else:
+            if len(gain_init) != n_gains:
+                raise Exception('Gain initialization has incorrect dimensions!')
+            param_init += list(gain_init)
+
     # Print stats
-    print("Initial Chi^2_1: %f Chi^2_2: %f Chi^2_3: %f" % (chisq1(), chisq2(), chisq3()))
+    print("Initial Chi^2_1: %f Chi^2_2: %f Chi^2_3: %f" % (chisq1(param_init[n_params:],gains_t1,gains_t2), chisq2(param_init[n_params:],gains_t1,gains_t2), chisq3(param_init[n_params:],gains_t1,gains_t2)))
     print("Initial Objective Function: %f" % (objfunc(param_init)))
 
     if d1 in DATATERMS:
@@ -432,8 +511,9 @@ def modeler_func(Obsdata, model_init, model_prior,
 
     # Format output
     out = res.x
-    set_params(out)
-    tparams = transform_params(out)
+    set_params(out[:n_params])
+    gains = out[n_params:]
+    tparams = transform_params(out[:n_params])
 
     # Compute uncertainties (assuming that the chi^2 is not normalized!)    
 #    uncertainty = np.zeros(len(res.x))
@@ -456,12 +536,32 @@ def modeler_func(Obsdata, model_init, model_prior,
     # Print stats
     print("time: %f s" % (tstop - tstart))
     print("J: %f" % res.fun)
-    print("Final Chi^2_1: %f Chi^2_2: %f  Chi^2_3: %f" % (chisq1(), chisq2(), chisq3()))
+    print("Final Chi^2_1: %f Chi^2_2: %f  Chi^2_3: %f" % (chisq1(gains,gains_t1,gains_t2), chisq2(gains,gains_t1,gains_t2), chisq3(gains,gains_t1,gains_t2)))
 
     print(res.message)
 
     # Return fitted model
-    return trial_model #{'model':trial_model, 'res':res}
+    ret = {'model':trial_model, 'res':res}
+    
+    if fit_gains:
+        ret['gains'] = gains
+    
+        # Create and return a caltable
+        caldict = {}
+        for site in set(np.array(gain_list)[:,1]):
+            caldict[site] = []
+    
+        for j in range(len(gains)):
+            caldict[gain_list[j][1]].append((gain_list[j][0], (1.0 + gains[j]), (1.0 + gains[j])))
+
+        for site in caldict.keys():
+            caldict[site] = np.array(caldict[site], dtype=DTCAL)
+
+        caltable = ehtim.caltable.Caltable(Obsdata.ra, Obsdata.dec, Obsdata.rf, Obsdata.bw, caldict, Obsdata.tarr,
+                                           source=Obsdata.source, mjd=Obsdata.mjd, timetype=Obsdata.timetype)
+        ret['caltable'] = caltable 
+
+    return ret
 
 ##################################################################################################
 # Wrapper Functions
@@ -496,18 +596,30 @@ def chisq(model, uv, data, sigma, dtype):
 
     return chisq
 
-def chisqgrad(model, uv, data, sigma, dtype, param_mask):
+def chisqgrad(model, uv, data, sigma, dtype, param_mask, fit_gains=False, gains=None, gains_t1=None, gains_t2=None):
     """return the chi^2 gradient for the appropriate dtype
     """
 
     chisqgrad = np.zeros_like(param_mask)
+    if fit_gains:
+        gaingrad = np.zeros_like(gains)
+    else:
+        gaingrad = np.array([])
+
     if not dtype in DATATERMS:
-        return chisqgrad[param_mask]
+        return np.concatenate([chisqgrad[param_mask],gaingrad])
 
     if dtype == 'vis':
         chisqgrad = chisqgrad_vis(model, uv, data, sigma)
     elif dtype == 'amp':
         chisqgrad = chisqgrad_amp(model, uv, data, sigma)
+
+        if fit_gains:
+            i1 = model.sample_uv(uv[:,0],uv[:,1])
+            amp_samples = np.abs(i1)
+            amp = data
+            pp = ((amp - amp_samples) * amp_samples) / (sigma**2)
+            gaingrad = 2.0/(1.0 + np.array(gains)) * np.array([np.sum(pp[(np.array(gains_t1) == j) + (np.array(gains_t2) == j)]) for j in range(len(gains))])/len(data)
     elif dtype == 'logamp':
         chisqgrad = chisqgrad_logamp(model, uv, data, sigma)
     elif dtype == 'bs':
@@ -523,7 +635,7 @@ def chisqgrad(model, uv, data, sigma, dtype, param_mask):
     elif dtype == 'logcamp_diag':
         chisqgrad = chisqgrad_logcamp_diag(model, uv, data, sigma)
 
-    return chisqgrad[param_mask]
+    return np.concatenate([chisqgrad[param_mask],gaingrad])
 
 def chisqdata(Obsdata, dtype, pol='I', **kwargs):
 
@@ -944,7 +1056,7 @@ def chisqdata_amp(Obsdata, pol='I',**kwargs):
     atype=amp_poldict[pol]
     etype=sig_poldict[pol]
     if (Obsdata.amp is None) or (len(Obsdata.amp)==0) or pol!='I':
-        data_arr = Obsdata.unpack(['t1','t2','u','v',vtype,atype,etype], debias=debias)
+        data_arr = Obsdata.unpack(['time','t1','t2','u','v',vtype,atype,etype], debias=debias)
 
     else: # TODO -- pre-computed  with not stokes I? 
         print("Using pre-computed amplitude table in amplitude chi^2!")
