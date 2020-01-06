@@ -210,7 +210,7 @@ def imgsum(im_or_mov, obs, obs_uncal, outname, outdir='.', title='imgsum', comme
         print("chi^2 amp: %0.2f %0.2f" % (chi2amp, chi2amp_uncal))
         print("chi^2 cphase: %0.2f %0.2f" % (chi2cphase, chi2cphase_uncal))
         print("chi^2 logcamp: %0.2f %0.2f" % (chi2logcamp, chi2logcamp_uncal))
-        print("chi^2 camp: %0.2f %0.2f" % (chi2logcamp, chi2logcamp_uncal))
+        print("chi^2 camp: %0.2f %0.2f" % (chi2camp, chi2camp_uncal))
 
         fs =int(1*fontsize)
         fs2 =int(.8*fontsize)
