@@ -154,6 +154,7 @@ def transform_grad_param(x, x_prior):
 def modeler_func(Obsdata, model_init, model_prior,
                    d1='vis', d2=False, d3=False,
                    alpha_d1=100, alpha_d2=100, alpha_d3=100,
+                   flux=1.0, alpha_flux=0,
                    fit_gains=False,gain_init=None,gain_prior=None,
                    minimizer_func='scipy.optimize.minimize',
                    minimizer_kwargs=None,
@@ -345,6 +346,24 @@ def modeler_func(Obsdata, model_init, model_prior,
         df = np.array([prior_grad_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(params))])
         return df/f
 
+    # Define constraint functions
+    def flux_constraint():
+        if alpha_flux == 0.0: 
+            return 0.0
+
+        return ((trial_model.total_flux() - flux)/flux)**2
+
+    def flux_constraint_grad(params):
+        if alpha_flux == 0.0: 
+            return 0.0
+
+        fluxmask = np.zeros_like(params)
+        for j in range(len(param_map)):
+            if param_map[j][1] == 'F0':
+                fluxmask[j] = 1.0
+
+        return 2.0 * (trial_model.total_flux() - flux)/flux * fluxmask
+
     # Define the objective function and gradient
     def objfunc(params):
         if verbose_callback:
@@ -354,16 +373,18 @@ def modeler_func(Obsdata, model_init, model_prior,
         gains = params[n_params:]
         datterm  = alpha_d1 * (chisq1(gains,gains_t1,gains_t2) - 1) + alpha_d2 * (chisq2(gains,gains_t1,gains_t2) - 1) + alpha_d3 * (chisq3(gains,gains_t1,gains_t2) - 1)
         priterm  = prior(params[:n_params]) + prior_gain(params[n_params:])
+        fluxterm = alpha_flux * flux_constraint()
 
-        return datterm - priterm
+        return datterm - priterm + fluxterm
 
     def objgrad(params):
         set_params(params[:n_params])
         gains = params[n_params:]
         datterm  = alpha_d1 * chisq1grad(gains,gains_t1,gains_t2) + alpha_d2 * chisq2grad(gains,gains_t1,gains_t2) + alpha_d3 * chisq3grad(gains,gains_t1,gains_t2)
         priterm  = np.concatenate([prior_grad(params[:n_params]), prior_gain_grad(params[n_params:])])
+        fluxterm = alpha_flux * flux_constraint_grad(params)
 
-        grad = datterm - priterm
+        grad = datterm - priterm + fluxterm
 
         for j in range(n_params):
             grad[j] *= param_map[j][2] * transform_grad_param(params[j], model_prior[param_map[j][0]][param_map[j][1]])
@@ -480,7 +501,6 @@ def modeler_func(Obsdata, model_init, model_prior,
 
         res = opt.minimize(objfunc, param_init, jac=objgrad, callback=plotcur, bounds=bounds, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.dual_annealing':
-        # scipy.optimize.dual_annealing(func, bounds, args=(), maxiter=1000, local_search_options={}, initial_temp=5230.0, restart_temp_ratio=2e-05, visit=2.62, accept=-5.0, maxfun=10000000.0, seed=None, no_local_search=False, callback=None, x0=None)
         min_kwargs = {}
         min_kwargs['local_search_options'] = {'jac':objgrad,'method':'L-BFGS-B','options':{'maxiter':MAXIT, 'ftol':STOP, 'maxcor':NHIST,'gtol':STOP,'maxls':MAXLS}}
 
@@ -495,10 +515,6 @@ def modeler_func(Obsdata, model_init, model_prior,
       
         res = opt.dual_annealing(objfunc, x0=param_init, bounds=bounds, callback=plotcur, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.basinhopping':
-        # def basinhopping(func, x0, niter=100, T=1.0, stepsize=0.5,
-        #         minimizer_kwargs=None, take_step=None, accept_test=None,
-        #         callback=None, interval=50, disp=False, niter_success=None,
-        #         seed=None)
         min_kwargs = {}
         for key in minimizer_kwargs.keys():
             min_kwargs[key] = minimizer_kwargs[key]
@@ -514,14 +530,6 @@ def modeler_func(Obsdata, model_init, model_prior,
     set_params(out[:n_params])
     gains = out[n_params:]
     tparams = transform_params(out[:n_params])
-
-    # Compute uncertainties (assuming that the chi^2 is not normalized!)    
-#    uncertainty = np.zeros(len(res.x))
-#    for j in range(len(res.x)):
-#        proj = np.zeros(len(res.x))
-#        proj[j] = 1.0
-#        uncertainty[j] = np.sqrt(res.hess_inv(proj)[j])
-#        uncertainty[j] *= transform_grad_param(out[j], model_prior[param_map[j][0]][param_map[j][1]])
 
     print("\nFitted Parameters:")
     cur_idx = -1
