@@ -29,7 +29,8 @@ import scipy.optimize as opt
 import scipy.ndimage as nd
 import scipy.ndimage.filters as filt
 import matplotlib.pyplot as plt
-from  scipy.special import jv
+#from  scipy.special import jv
+import scipy.special as sps
 
 import ehtim.image as image
 import ehtim.model as model
@@ -68,8 +69,43 @@ PARAM_DETAILS = {'F0':[1.,'Jy'], 'FWHM':[RADPERUAS,'uas'], 'FWHM_maj':[RADPERUAS
 # Priors
 ##################################################################################################
 
-def param_bounds(prior_params):
+def cdf(x, prior_params):
     if prior_params['prior_type'] == 'flat':
+        return (  (x > prior_params['max']) * 1.0   
+                + (x > prior_params['min']) * (x < prior_params['max']) * (x - prior_params['min'])/(prior_params['max'] - prior_params['min']))
+    elif prior_params['prior_type'] == 'gauss':
+        return 0.5 * (1.0 + sps.erf( (x - prior_params['mean'])/(prior_params['std'] * np.sqrt(2.0)) ))
+    elif prior_params['prior_type'] == 'exponential':
+        return (1.0 - np.exp(-x/prior_params['std'])) * (x >= 0.0)
+    elif prior_params['prior_type'] == 'positive':
+        raise Exception('CDF is not defined for prior type "positive"')
+    elif prior_params['prior_type'] == 'none':
+        raise Exception('CDF is not defined for prior type "none"')
+    elif prior_params['prior_type'] == 'fixed':
+        raise Exception('CDF is not defined for prior type "fixed"')
+    else:
+        raise Exception('Prior type ' + prior_params['prior_type'] + ' not recognized!')
+
+def cdf_inverse(x, prior_params):
+    if prior_params['prior_type'] == 'flat':
+        return prior_params['min'] * (1.0 - x) + prior_params['max'] * x
+    elif prior_params['prior_type'] == 'gauss':
+        return prior_params['mean'] - np.sqrt(2.0) * prior_params['std'] * sps.erfcinv(2.0 * x)
+    elif prior_params['prior_type'] == 'exponential':
+        return prior_params['std'] * np.log(1.0/(1.0 - x))
+    elif prior_params['prior_type'] == 'positive':
+        raise Exception('CDF is not defined for prior type "positive"')
+    elif prior_params['prior_type'] == 'none':
+        raise Exception('CDF is not defined for prior type "none"')
+    elif prior_params['prior_type'] == 'fixed':
+        raise Exception('CDF is not defined for prior type "fixed"')
+    else:
+        raise Exception('Prior type ' + prior_params['prior_type'] + ' not recognized!')
+
+def param_bounds(prior_params):
+    if prior_params.get('transform','') == 'cdf':
+        bounds = [0.0, 1.0]
+    elif prior_params['prior_type'] == 'flat':
         bounds = [prior_params['min'],prior_params['max']]
     elif prior_params['prior_type'] == 'gauss':
         bounds = [prior_params['mean'] - prior_params['std'] * BOUNDS_GAUSS_NSIGMA, prior_params['mean'] + prior_params['std'] * BOUNDS_GAUSS_NSIGMA]
@@ -133,6 +169,11 @@ def transform_param(x, x_prior, inverse=True):
             return np.exp(x)
         else:
             return np.log(x)
+    elif transform == 'cdf':
+        if inverse:
+            return cdf_inverse(x, x_prior)
+        else:
+            return cdf(x, x_prior)
     else:
         return x
 
@@ -145,6 +186,8 @@ def transform_grad_param(x, x_prior):
 
     if transform == 'log':
         return np.exp(x)
+    elif transform == 'cdf':
+        return 1.0/prior_func(transform_param(x,x_prior),x_prior)
     else:
         return 1.0        
 
@@ -153,7 +196,7 @@ def transform_grad_param(x, x_prior):
 ##################################################################################################
 def modeler_func(Obsdata, model_init, model_prior,
                    d1='vis', d2=False, d3=False,
-                   alpha_d1=100, alpha_d2=100, alpha_d3=100,
+                   normchisq = False, alpha_d1=0, alpha_d2=0, alpha_d3=0,
                    flux=1.0, alpha_flux=0,
                    fit_gains=False,gain_init=None,gain_prior=None,
                    minimizer_func='scipy.optimize.minimize',
@@ -222,9 +265,12 @@ def modeler_func(Obsdata, model_init, model_prior,
             if model_prior[j][param]['prior_type'] != 'fixed':
                 param_mask.append(True)
                 try:
-                    param_map.append([j,param,PARAM_DETAILS[param][0],PARAM_DETAILS[param][1]])
+                    if model_prior[j][param].get('transform','') == 'cdf' or minimizer_func in ['dynesty_static','dynesty_dynamic']:
+                        param_map.append([j,param,1,PARAM_DETAILS[param][1],PARAM_DETAILS[param][0]])
+                    else:
+                        param_map.append([j,param,PARAM_DETAILS[param][0],PARAM_DETAILS[param][1],PARAM_DETAILS[param][0]])
                 except:
-                    param_map.append([j,param,1,''])
+                    param_map.append([j,param,1,'',1])
                     pass
             else:
                 param_mask.append(False)
@@ -233,6 +279,37 @@ def modeler_func(Obsdata, model_init, model_prior,
     (data1, sigma1, uv1) = chisqdata(Obsdata, d1)
     (data2, sigma2, uv2) = chisqdata(Obsdata, d2)
     (data3, sigma3, uv3) = chisqdata(Obsdata, d3)
+
+    # For completeness, determine constant addition to the log-likelihood
+    ln_norm1 = ln_norm2 = ln_norm3 = 0.0
+    if normchisq == False:
+        print('Assigning data weights to give the correct log-likelihood...')
+        try: 
+            alpha_d1 = 0.5 * len(data1)
+            ln_norm1 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma1))
+            print('alpha_d1:',alpha_d1)
+        except: pass
+        try: 
+            alpha_d2 = 0.5 * len(data2)
+            ln_norm2 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma2))
+            print('alpha_d2:',alpha_d2)
+        except: pass
+        try: 
+            alpha_d3 = 0.5 * len(data3)        
+            ln_norm3 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma3))
+            print('alpha_d3:',alpha_d3)
+        except: pass
+
+        if d1 in ['vis','bs']:
+            alpha_d1 *= 2
+            ln_norm1 *= 2
+        if d2 in ['vis','bs']:
+            alpha_d2 *= 2
+            ln_norm2 *= 2
+        if d3 in ['vis','bs']:
+            alpha_d3 *= 2
+            ln_norm3 *= 2
+    ln_norm = ln_norm1 + ln_norm2 + ln_norm3
 
     # Determine the mapping between solution gains and the input visibilities
     # NOTE: THIS MUST BE FIXED TO MATCH FLAGGING AND SYSTEMATIC NOISE STUFF
@@ -317,10 +394,16 @@ def modeler_func(Obsdata, model_init, model_prior,
         return chisqgrad(trial_model, uv3, gain*data3, gain*sigma3, d3, param_mask, fit_gains, gains, gains_t1, gains_t2)
 
     def transform_params(params, inverse=True):
-        return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
+        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+            return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
+        else:
+            # Over-ride all specified parameter transformations to assume CDF
+            # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube), thus the transformation does not need to be inverted
+            return params
 
     def set_params(params):
         tparams = transform_params(params)
+
         for j in range(len(params)):
             if param_map[j][1] in trial_model.params[param_map[j][0]].keys():
                 trial_model.params[param_map[j][0]][param_map[j][1]] = tparams[j] * param_map[j][2]
@@ -371,24 +454,40 @@ def modeler_func(Obsdata, model_init, model_prior,
 
         set_params(params[:n_params])
         gains = params[n_params:]
-        datterm  = alpha_d1 * (chisq1(gains,gains_t1,gains_t2) - 1) + alpha_d2 * (chisq2(gains,gains_t1,gains_t2) - 1) + alpha_d3 * (chisq3(gains,gains_t1,gains_t2) - 1)
-        priterm  = prior(params[:n_params]) + prior_gain(params[n_params:])
+        datterm  = alpha_d1 * chisq1(gains,gains_t1,gains_t2) + alpha_d2 * chisq2(gains,gains_t1,gains_t2) + alpha_d3 * chisq3(gains,gains_t1,gains_t2)
+        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+            priterm  = prior(params[:n_params]) + prior_gain(params[n_params:])
+        else:
+            priterm  = 0.0
         fluxterm = alpha_flux * flux_constraint()
 
-        return datterm - priterm + fluxterm
+        return datterm - priterm + fluxterm - ln_norm
 
     def objgrad(params):
         set_params(params[:n_params])
         gains = params[n_params:]
         datterm  = alpha_d1 * chisq1grad(gains,gains_t1,gains_t2) + alpha_d2 * chisq2grad(gains,gains_t1,gains_t2) + alpha_d3 * chisq3grad(gains,gains_t1,gains_t2)
-        priterm  = np.concatenate([prior_grad(params[:n_params]), prior_gain_grad(params[n_params:])])
+        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+            priterm  = np.concatenate([prior_grad(params[:n_params]), prior_gain_grad(params[n_params:])])
+        else:
+            priterm  = 0.0
         fluxterm = alpha_flux * flux_constraint_grad(params)
 
         grad = datterm - priterm + fluxterm
 
-        for j in range(n_params):
-            grad[j] *= param_map[j][2] * transform_grad_param(params[j], model_prior[param_map[j][0]][param_map[j][1]])
-
+        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+            for j in range(n_params):
+                grad[j] *= param_map[j][2] * transform_grad_param(params[j], model_prior[param_map[j][0]][param_map[j][1]])
+        else:
+            # For dynesty, over-ride all specified parameter transformations to assume CDF
+            # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube)
+            # The Jacobian still needs to account for the parameter transformation
+            for j in range(len(params)):
+                if j < n_params:
+                    grad[j] /= prior_func(params[j],model_prior[param_map[j][0]][param_map[j][1]])
+                else:
+                    grad[j] /= prior_func(gains[j-n_params], gain_prior[gain_list[j-n_params][1]])                    
+    
         if test_gradient:
             import copy
             dx = 1e-10
@@ -412,7 +511,8 @@ def modeler_func(Obsdata, model_init, model_prior,
     def plotcur(params_step, *args):
         global nit
         if show_updates and (nit % update_interval == 0):
-            print('Params:',transform_params(params_step[:n_params]))
+            print('Params:',params_step[:n_params])
+            print('Transformed Params:',transform_params(params_step[:n_params]))
             gains = params_step[n_params:]
             chi2_1 = chisq1(gains,gains_t1,gains_t2)
             chi2_2 = chisq2(gains,gains_t1,gains_t2)
@@ -446,18 +546,21 @@ def modeler_func(Obsdata, model_init, model_prior,
         for j in range(len(param_map)):
             pm = param_map[j]
             pb = param_bounds(model_prior[pm[0]][pm[1]])
-            if model_prior[pm[0]][pm[1]]['prior_type'] not in ['positive','none','fixed']:
+            if (model_prior[pm[0]][pm[1]]['prior_type'] not in ['positive','none','fixed']) and (model_prior[pm[0]][pm[1]].get('transform','') != 'cdf'):
                 pb[0] = transform_param(pb[0]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
                 pb[1] = transform_param(pb[1]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
             bounds.append(pb)
         for j in range(n_gains):
-            bounds.append([0, 100])
-
+            pb = param_bounds(gain_prior[gain_list[j][1]])
+            if (gain_prior[gain_list[j][1]]['prior_type'] not in ['positive','none','fixed']) and (gain_prior[gain_list[j][1]].get('transform','') != 'cdf'):
+                pb[0] = transform_param(pb[0], gain_prior[gain_list[j][1]], inverse=False)
+                pb[1] = transform_param(pb[1], gain_prior[gain_list[j][1]], inverse=False)
+            bounds.append(pb)
         bounds = np.array(bounds)
 
     if use_bounds == False:
         if minimizer_func in ['scipy.optimize.dual_annealing']:
-            print('Bounds are required for ' + minimizer_func + '!')
+            raise Exception('Bounds are required for ' + minimizer_func + '!')
         else:
             bounds = None
 
@@ -520,6 +623,55 @@ def modeler_func(Obsdata, model_init, model_prior,
             min_kwargs[key] = minimizer_kwargs[key]
 
         res = opt.basinhopping(objfunc, param_init, **min_kwargs)  
+    elif minimizer_func in ['dynesty_static','dynesty_dynamic']:
+        import dynesty
+        from dynesty import utils as dyfunc
+
+        def prior_transform(u):
+            # This function transforms samples from the unit hypercube (u) to the target prior (x) 
+            model_params_u = u[:n_params]    
+            gain_params_u  = u[n_params:]
+            model_params_x = [cdf_inverse(model_params_u[j], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(model_params_u))]
+            gain_params_x  = [cdf_inverse( gain_params_u[j], gain_prior[gain_list[j][1]]) for j in range(len(gain_params_u))]
+            return np.concatenate([model_params_x, gain_params_x])
+
+        def loglike(x):
+            # Note: the log-likelihood is defined in terms of x
+            return -objfunc(x)
+
+        def grad(x):
+            # Note: the log-likelihood gradient is defined in terms of x
+            return -objgrad(x)
+
+        if minimizer_func == 'dynesty_static':
+            sampler = dynesty.NestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, **minimizer_kwargs)
+        else:
+            sampler = dynesty.DynamicNestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, **minimizer_kwargs)
+        sampler.run_nested()
+        tstop = time.time()        
+        print("time: %f s" % (tstop - tstart))
+        res = sampler.results
+        try: res.summary()
+        except: pass
+
+        # Extract sampling results.
+        samples = res.samples  # samples
+        weights = np.exp(res.logwt - res.logz[-1])  # normalized weights
+        mean, cov = dyfunc.mean_and_cov(samples, weights)
+        set_params(mean[:n_params])
+
+        print("\nFitted Parameters:")
+        cur_idx = -1
+        for j in range(len(param_map)):
+            if param_map[j][0] != cur_idx:
+                cur_idx = param_map[j][0]
+                print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
+            print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (mean[j] * param_map[j][2]/param_map[j][4],cov[j,j]**0.5 * param_map[j][2]/param_map[j][4]))
+        print('\n')
+
+        # Return fitted model
+        ret = {'res':res, 'model':trial_model, 'sampler':sampler,'param_map':param_map}
+        return ret
     else:
         raise Exception('Minimizer function ' + minimizer_func + ' is not recognized!')
 
@@ -537,8 +689,7 @@ def modeler_func(Obsdata, model_init, model_prior,
         if param_map[j][0] != cur_idx:
             cur_idx = param_map[j][0]
             print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
-        print(('\t' + param_map[j][1] + ': %f ' + param_map[j][3]) % tparams[j])
-#        print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (tparams[j], uncertainty[j]))
+        print(('\t' + param_map[j][1] + ': %f ' + param_map[j][3]) % (tparams[j] * param_map[j][2]/param_map[j][4]))
     print('\n')
 
     # Print stats
@@ -549,7 +700,7 @@ def modeler_func(Obsdata, model_init, model_prior,
     print(res.message)
 
     # Return fitted model
-    ret = {'model':trial_model, 'res':res}
+    ret = {'model':trial_model, 'res':res,'param_map':param_map}
     
     if fit_gains:
         ret['gains'] = gains
