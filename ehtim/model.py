@@ -1037,12 +1037,10 @@ class Model(object):
     def default_prior(self):
         return [default_prior(self.models[j],self.params[j]) for j in range(self.N_models())]        
 
-    def display(self, fov=FOV_DEFAULT, npix=NPIX_DEFAULT, **kwargs):        
-        return self.make_image(fov, npix, **kwargs).display(**kwargs)
+    def display(self, fov=FOV_DEFAULT, npix=NPIX_DEFAULT, polrep='stokes', pol_prim=None, pulse=PULSE_DEFAULT, time=0., **kwargs):        
+        return self.make_image(fov, npix, polrep, pol_prim, pulse, time).display(**kwargs)
 
-    def make_image(self, fov, npix, ra=RA_DEFAULT, dec=DEC_DEFAULT, rf=RF_DEFAULT, source=SOURCE_DEFAULT,
-               polrep='stokes', pol_prim=None, pulse=PULSE_DEFAULT,
-               mjd=MJD_DEFAULT, time=0.):
+    def make_image(self, fov, npix, polrep='stokes', pol_prim=None, pulse=PULSE_DEFAULT, time=0.):
         """Sample the model onto a square image.
 
            Args:
@@ -1067,9 +1065,9 @@ class Model(object):
         pdim = fov/float(npix)
         npix = int(npix)
         imarr = np.zeros((npix,npix))
-        outim = image.Image(imarr, pdim, ra, dec,
+        outim = image.Image(imarr, pdim, self.ra, self.dec,
                       polrep=polrep, pol_prim=pol_prim,
-                      rf=rf, source=source, mjd=mjd, time=time, pulse=pulse)
+                      rf=self.rf, source=self.source, mjd=self.mjd, time=time, pulse=pulse)
         
         return self.image_same(outim)
 
