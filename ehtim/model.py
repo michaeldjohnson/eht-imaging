@@ -28,52 +28,93 @@ LINE_THICKNESS = 2 # Thickness of 1D models on the image, in pixels
 FOV_DEFAULT = 100.*RADPERUAS
 NPIX_DEFAULT = 256
 
+COMPLEX_BASIS = 'abs-arg' # 'abs-arg' or 're-im'
+
 ###########################################################################################################################################
 #Model object
 ###########################################################################################################################################
 
-def model_params(model_type, model_params=None):
+def model_params(model_type, model_params=None, fit_pol=False, fit_cpol=False):
     """Return the ordered list of model parameters for a specified model type. This order must match that of the gradient function, sample_1model_grad_uv.
     """
 
+    if COMPLEX_BASIS == 're-im':
+        complex_labels = ['_re','_im']
+    elif COMPLEX_BASIS == 'abs-arg':
+        complex_labels = ['_abs','_arg']
+    else:
+        raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
+
+    params = []
+
+    # Function to add polarimetric parameters; these must be added before stretch parameters
+    def add_pol():
+        if fit_pol:
+            if model_type.find('mring') == -1:
+                params.append('pol_frac')
+                params.append('pol_evpa')
+            else:            
+                for j in range(-(len(model_params['beta_list_pol'])-1)//2,(len(model_params['beta_list_pol'])+1)//2):
+                    params.append('betapol' + str(j) + complex_labels[0])
+                    params.append('betapol' + str(j) + complex_labels[1])
+        if fit_cpol:
+            if model_type.find('mring') == -1:
+                params.append('cpol_frac')
+            else:
+                for j in range(len(model_params['beta_list_cpol'])):
+                    params.append('betacpol' + str(j+1) + complex_labels[0])
+                    params.append('betacpol' + str(j+1) + complex_labels[1])
+
     if model_type == 'point':
         params = ['F0','x0','y0']
+        add_pol()
     elif model_type == 'circ_gauss':
         params = ['F0','FWHM','x0','y0']
+        add_pol()
     elif model_type == 'gauss':
         params = ['F0','FWHM_maj','FWHM_min','PA','x0','y0']
+        add_pol()
     elif model_type == 'disk':
         params = ['F0','d','x0','y0']
+        add_pol()
     elif model_type == 'ring':
         params = ['F0','d','x0','y0']
+        add_pol()
     elif model_type == 'stretched_ring':
         params = ['F0','d','x0','y0','stretch','stretch_PA']
+        add_pol()
     elif model_type == 'thick_ring':
         params = ['F0','d','alpha','x0','y0']
+        add_pol()
     elif model_type == 'stretched_thick_ring':
         params = ['F0','d','alpha','x0','y0','stretch','stretch_PA']
+        add_pol()
     elif model_type == 'mring':
         params = ['F0','d','x0','y0']
         for j in range(len(model_params['beta_list'])):
-            params.append('beta' + str(j+1) + '_re')
-            params.append('beta' + str(j+1) + '_im')
+            params.append('beta' + str(j+1) + complex_labels[0])
+            params.append('beta' + str(j+1) + complex_labels[1])
+        add_pol()
     elif model_type == 'stretched_mring':
         params = ['F0','d','x0','y0']
         for j in range(len(model_params['beta_list'])):
-            params.append('beta' + str(j+1) + '_re')
-            params.append('beta' + str(j+1) + '_im')
+            params.append('beta' + str(j+1) + complex_labels[0])
+            params.append('beta' + str(j+1) + complex_labels[1])
+        add_pol()
         params.append('stretch')
         params.append('stretch_PA')
     elif model_type == 'thick_mring':
-        params = ['F0','d','alpha', 'x0','y0']
+        params = ['F0','d','alpha', 'x0','y0']            
         for j in range(len(model_params['beta_list'])):
-            params.append('beta' + str(j+1) + '_re')
-            params.append('beta' + str(j+1) + '_im')
+            params.append('beta' + str(j+1) + complex_labels[0])
+            params.append('beta' + str(j+1) + complex_labels[1])
+        add_pol()
     elif model_type == 'stretched_thick_mring':
         params = ['F0','d','alpha', 'x0','y0']
         for j in range(len(model_params['beta_list'])):
-            params.append('beta' + str(j+1) + '_re')
-            params.append('beta' + str(j+1) + '_im')
+            params.append('beta' + str(j+1) + complex_labels[0])
+            params.append('beta' + str(j+1) + complex_labels[1])
+        add_pol()
         params.append('stretch')
         params.append('stretch_PA')
     else:
@@ -82,9 +123,18 @@ def model_params(model_type, model_params=None):
 
     return params
 
-def default_prior(model_type,model_params=None):
+def default_prior(model_type,model_params=None,fit_pol=False,fit_cpol=False):
     """Return the default model prior and transformation for a specified model type
     """
+
+    if COMPLEX_BASIS == 're-im':
+        complex_labels = ['_re','_im']
+        complex_priors = [{'prior_type':'flat','min':-0.5,'max':0.5}, {'prior_type':'flat','min':-0.5,'max':0.5}]
+    elif COMPLEX_BASIS == 'abs-arg':
+        complex_labels = ['_abs','_arg']
+        complex_priors = [{'prior_type':'flat','min':0.0,'max':0.5}, {'prior_type':'flat','min':0.0,'max':2.0*np.pi}]
+    else:
+        raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
 
     prior = {'F0':{'prior_type':'none','transform':'log'}, 
              'x0':{'prior_type':'none'}, 
@@ -116,31 +166,48 @@ def default_prior(model_type,model_params=None):
     elif model_type == 'mring':
         prior['d'] = {'prior_type':'positive','transform':'log'}
         for j in range(len(model_params['beta_list'])):
-            prior['beta' + str(j+1) + '_re'] = {'prior_type':'flat','min':-0.5,'max':0.5}
-            prior['beta' + str(j+1) + '_im'] = {'prior_type':'flat','min':-0.5,'max':0.5}
+            prior['beta' + str(j+1) + complex_labels[0]] = complex_priors[0]
+            prior['beta' + str(j+1) + complex_labels[1]] = complex_priors[1]
     elif model_type == 'stretched_mring':
         prior['d'] = {'prior_type':'positive','transform':'log'}
         for j in range(len(model_params['beta_list'])):
-            prior['beta' + str(j+1) + '_re'] = {'prior_type':'flat','min':-0.5,'max':0.5}
-            prior['beta' + str(j+1) + '_im'] = {'prior_type':'flat','min':-0.5,'max':0.5}
+            prior['beta' + str(j+1) + complex_labels[0]] = complex_priors[0]
+            prior['beta' + str(j+1) + complex_labels[1]] = complex_priors[1]
         prior['stretch'] = {'prior_type':'positive','transform':'log'}
         prior['stretch_PA'] = {'prior_type':'none'}
     elif model_type == 'thick_mring':
         prior['d'] = {'prior_type':'positive','transform':'log'}
         prior['alpha'] = {'prior_type':'positive','transform':'log'}
         for j in range(len(model_params['beta_list'])):
-            prior['beta' + str(j+1) + '_re'] = {'prior_type':'flat','min':-0.5,'max':0.5}
-            prior['beta' + str(j+1) + '_im'] = {'prior_type':'flat','min':-0.5,'max':0.5}
+            prior['beta' + str(j+1) + complex_labels[0]] = complex_priors[0]
+            prior['beta' + str(j+1) + complex_labels[1]] = complex_priors[1]
     elif model_type == 'stretched_thick_mring':
         prior['d'] = {'prior_type':'positive','transform':'log'}
         prior['alpha'] = {'prior_type':'positive','transform':'log'}
         for j in range(len(model_params['beta_list'])):
-            prior['beta' + str(j+1) + '_re'] = {'prior_type':'flat','min':-0.5,'max':0.5}
-            prior['beta' + str(j+1) + '_im'] = {'prior_type':'flat','min':-0.5,'max':0.5}
+            prior['beta' + str(j+1) + complex_labels[0]] = complex_priors[0]
+            prior['beta' + str(j+1) + complex_labels[1]] = complex_priors[1]
         prior['stretch'] = {'prior_type':'positive','transform':'log'}
         prior['stretch_PA'] = {'prior_type':'none'}
     else:
         print('Model not recognized!')
+
+    if fit_pol:
+        if model_type.find('mring') == -1:
+            prior['pol_frac'] = {'prior_type':'flat','min':0.0,'max':1.0}
+            prior['pol_evpa'] = {'prior_type':'flat','min':0.0,'max':np.pi}
+        else:            
+            for j in range(-(len(model_params['beta_list_pol'])-1)//2,(len(model_params['beta_list_pol'])+1)//2):
+                prior['betapol' + str(j) + complex_labels[0]] = complex_priors[0]
+                prior['betapol' + str(j) + complex_labels[1]] = complex_priors[1]
+
+    if fit_cpol:
+        if model_type.find('mring') == -1:
+            prior['cpol_frac'] = {'prior_type':'flat','min':-1.0,'max':1.0}
+        else:
+            for j in range(len(model_params['beta_list_cpol'])):
+                prior['betacpol' + str(j) + complex_labels[0]] = complex_priors[0]
+                prior['betacpol' + str(j) + complex_labels[1]] = complex_priors[1]
 
     return prior
 
@@ -158,80 +225,145 @@ def stretch_uv(u, v, params):
                + u * np.cos(params['stretch_PA']) * np.sin(params['stretch_PA']) * (params['stretch'] - 1.0))
     return (u_stretch,v_stretch)
 
-def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS):
+def get_const_polfac(model_type, params, pol):
+    # Return the scaling factor for models with constant fractional polarization
+
+    if model_type.find('mring') != -1:
+        # mring models have polarization information specified differently than a constant scaling factor
+        return 1.0
+
+    try:
+        if pol == 'I':
+            return 1.0
+        elif pol == 'Q':
+            return params['pol_frac'] * np.cos(2.0 * params['pol_evpa'])
+        elif pol == 'U':
+            return params['pol_frac'] * np.sin(2.0 * params['pol_evpa'])
+        elif pol == 'V':
+            return params['cpol_frac']
+        elif pol == 'P':
+            return params['pol_frac'] * np.exp(1j * 2.0 * params['pol_evpa'])
+        elif pol == 'RR':
+            return get_const_polfac(model_type, params, 'I') + get_const_polfac(model_type, params, 'V')
+        elif pol == 'RL':
+            return get_const_polfac(model_type, params, 'Q') + 1j*get_const_polfac(model_type, params, 'U')
+        elif pol == 'LR':
+            return get_const_polfac(model_type, params, 'Q') - 1j*get_const_polfac(model_type, params, 'U')
+        elif pol == 'LL':
+            return get_const_polfac(model_type, params, 'I') - get_const_polfac(model_type, params, 'V')
+    except Exception:
+        pass
+
+    return 0.0
+
+def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):   
     if model_type == 'point':
-        return params['F0'] * (np.abs( x - params['x0']) < psize/2.0) * (np.abs( y - params['y0']) < psize/2.0)
+        val = params['F0'] * (np.abs( x - params['x0']) < psize/2.0) * (np.abs( y - params['y0']) < psize/2.0)
     elif model_type == 'circ_gauss':
         sigma = params['FWHM'] / (2. * np.sqrt(2. * np.log(2.)))
-        return (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['FWHM']**2) * 
+        val = (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['FWHM']**2) * 
                np.exp(-((x - params['x0'])**2 + (y - params['y0'])**2)/(2*sigma**2)))
     elif model_type == 'gauss':
         sigma_maj = params['FWHM_maj'] / (2. * np.sqrt(2. * np.log(2.)))
         sigma_min = params['FWHM_min'] / (2. * np.sqrt(2. * np.log(2.)))
         cth = np.cos(params['PA'])
         sth = np.sin(params['PA'])
-        return (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['FWHM_maj'] * params['FWHM_min']) * 
+        val = (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['FWHM_maj'] * params['FWHM_min']) * 
                np.exp(-((y - params['y0'])*np.cos(params['PA']) + (x - params['x0'])*np.sin(params['PA']))**2/(2*sigma_maj**2) +
                       -((x - params['x0'])*np.cos(params['PA']) - (y - params['y0'])*np.sin(params['PA']))**2/(2*sigma_min**2)))
     elif model_type == 'disk':
-        return params['F0']*psize**2/(np.pi*params['d']**2/4.) * (np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2) < params['d']/2.0) 
+        val = params['F0']*psize**2/(np.pi*params['d']**2/4.) * (np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2) < params['d']/2.0) 
     elif model_type == 'ring':
-        return (params['F0']*psize**2/(np.pi*params['d']*psize*LINE_THICKNESS)
+        val = (params['F0']*psize**2/(np.pi*params['d']*psize*LINE_THICKNESS)
                 * (params['d']/2.0 - psize*LINE_THICKNESS/2 < np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2))
                 * (params['d']/2.0 + psize*LINE_THICKNESS/2 > np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2)))
     elif model_type == 'thick_ring':
         r = np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2)
         z = 4.*np.log(2.) * r * params['d']/params['alpha']**2
-        return (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['alpha']**2)
+        val = (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['alpha']**2)
                 * np.exp(-4.*np.log(2.)/params['alpha']**2*(r**2 + params['d']**2/4.) + z)
                 * sps.ive(0, z)) 
     elif model_type == 'mring':
         phi = np.angle((y - params['y0']) + 1j*(x - params['x0']))
-        return (params['F0']*psize**2/(np.pi*params['d']*psize*LINE_THICKNESS)
-                * (1.0 + np.sum([2.*np.real(params['beta_list'][m-1] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list'])+1)],axis=0))  
+        if pol == 'I':
+            beta_factor = (1.0 + np.sum([2.*np.real(params['beta_list'][m-1] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor = params['beta_list_cpol'][0] + np.sum([2.*np.real(params['beta_list_cpol'][m] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+        elif pol in ['Q','U','P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * np.exp(1j * m * phi) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+            if pol == 'Q':
+                beta_factor = np.real(beta_factor)
+            elif pol == 'U':
+                beta_factor = np.imag(beta_factor)
+            elif pol == 'P':
+                pass
+        else:
+            beta_factor = 0.0
+
+        val = (params['F0']*psize**2/(np.pi*params['d']*psize*LINE_THICKNESS)
+                * beta_factor
                 * (params['d']/2.0 - psize*LINE_THICKNESS/2 < np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2))
                 * (params['d']/2.0 + psize*LINE_THICKNESS/2 > np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2)))
     elif model_type == 'thick_mring':
         phi = np.angle((y - params['y0']) + 1j*(x - params['x0']))
         r = np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2)
         z = 4.*np.log(2.) * r * params['d']/params['alpha']**2
-        return (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['alpha']**2)
+        if pol == 'I':
+            beta_factor = (sps.ive(0, z) + np.sum([2.*np.real(sps.ive(m, z) * params['beta_list'][m-1] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor = (sps.ive(0, z) * params['beta_list_cpol'][0] + np.sum([2.*np.real(sps.ive(m, z) * params['beta_list_cpol'][m] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+        elif pol in ['Q','U','P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.ive(m, z) * np.exp(1j * m * phi) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+            if pol == 'Q':
+                beta_factor = np.real(beta_factor)
+            elif pol == 'U':
+                beta_factor = np.imag(beta_factor)
+            elif pol == 'P':
+                pass
+        else:
+            # Note: not all polarizations accounted for yet (need RR, RL, LR, LL; do these by calling for linear combinations of I, Q, U, V)!
+            beta_factor = 0.0
+
+        val = (params['F0']*psize**2 * 4.0 * np.log(2.)/(np.pi * params['alpha']**2)
                 * np.exp(-4.*np.log(2.)/params['alpha']**2*(r**2 + params['d']**2/4.) + z)
-                * (sps.ive(0, z) + np.sum([2.*np.real(sps.ive(m, z) * params['beta_list'][m-1] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list'])+1)],axis=0)))
+                * beta_factor)
     elif model_type[:9] == 'stretched':
         params_stretch = params.copy()
         params_stretch['F0'] /= params['stretch']
-        return sample_1model_xy(*stretch_xy(x, y, params), model_type[10:], params_stretch, psize)
+        val = sample_1model_xy(*stretch_xy(x, y, params), model_type[10:], params_stretch, psize, pol=pol)
     else:
         print('Model ' + model_type + ' not recognized!')
-        return 0.0
+        val = 0.0
+    return val * get_const_polfac(model_type, params, pol)
 
-def sample_1model_uv(u, v, model_type, params):
+def sample_1model_uv(u, v, model_type, params, pol='I'):
     if model_type == 'point':
-        return params['F0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
+        val = params['F0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
     elif model_type == 'circ_gauss':
-        return (params['F0'] 
+        val = (params['F0'] 
                * np.exp(-np.pi**2/(4.*np.log(2.)) * (u**2 + v**2) * params['FWHM']**2)
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
     elif model_type == 'gauss':
         u_maj = u*np.sin(params['PA']) + v*np.cos(params['PA'])
         u_min = u*np.cos(params['PA']) - v*np.sin(params['PA'])
-        return (params['F0'] 
+        val = (params['F0'] 
                * np.exp(-np.pi**2/(4.*np.log(2.)) * ((u_maj * params['FWHM_maj'])**2 + (u_min * params['FWHM_min'])**2))
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
     elif model_type == 'disk':
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
         #Add a small offset to avoid issues with division by zero
         z += (z == 0.0) * 1e-10
-        return (params['F0'] * 2.0/z * sps.jv(1, z) 
+        val = (params['F0'] * 2.0/z * sps.jv(1, z) 
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
     elif model_type == 'ring':
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
-        return (params['F0'] * sps.jv(0, z) 
+        val = (params['F0'] * sps.jv(0, z) 
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
     elif model_type == 'thick_ring':
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
-        return (params['F0'] * sps.jv(0, z) 
+        val = (params['F0'] * sps.jv(0, z) 
                * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
     elif model_type == 'mring':
@@ -239,44 +371,72 @@ def sample_1model_uv(u, v, model_type, params):
         # Flip the baseline sign to match eht-imaging conventions
         phi += np.pi
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
-        return (params['F0'] * (sps.jv(0, z) 
+
+        if pol == 'I':
+            beta_factor = (sps.jv(0, z) 
                + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor = (params['beta_list_cpol'][0] * sps.jv(0, z) 
+               + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+               + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+        else:
+            # Note: not all polarizations accounted for yet!
+            beta_factor = 0.0
+
+        val = params['F0'] * beta_factor * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
     elif model_type == 'thick_mring':
         phi = np.angle(v + 1j*u)
         # Flip the baseline sign to match eht-imaging conventions
         phi += np.pi
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
-        return (params['F0'] * (sps.jv(0, z) 
-               + np.sum([params['beta_list'][m-1] * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
+
+        if pol == 'I':
+            beta_factor = (sps.jv(0, z) 
+               + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor = (params['beta_list_cpol'][0] * sps.jv(0, z) 
+               + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+               + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+        else:
+            # Note: not all polarizations accounted for yet!
+            beta_factor = 0.0
+
+        val = (params['F0'] * beta_factor
                * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
     elif model_type[:9] == 'stretched':
         params_stretch = params.copy()        
         params_stretch['x0'] = 0.0
         params_stretch['y0'] = 0.0
-        return sample_1model_uv(*stretch_uv(u,v,params), model_type[10:], params_stretch) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
+        val = sample_1model_uv(*stretch_uv(u,v,params), model_type[10:], params_stretch, pol=pol) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
     else:
         print('Model ' + model_type + ' not recognized!')
-        return 0.0
+        val = 0.0
+    return val * get_const_polfac(model_type, params, pol)
 
-def sample_1model_graduv_uv(u, v, model_type, params):
+def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
     # Gradient of the visibility function, (dV/du, dV/dv)
     # This function makes it convenient to, e.g., compute gradients of stretched images and to compute the model centroid
 
     vis = sample_1model_uv(u, v, model_type, params)
     if model_type == 'point': 
-        return np.array([ 1j * 2.0 * np.pi * params['x0'] * vis,
+        val = np.array([ 1j * 2.0 * np.pi * params['x0'] * vis,
                           1j * 2.0 * np.pi * params['y0'] * vis])
     elif model_type == 'circ_gauss': 
-        return np.array([ (1j * 2.0 * np.pi * params['x0'] - params['FWHM']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis,
+        val = np.array([ (1j * 2.0 * np.pi * params['x0'] - params['FWHM']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis,
                           (1j * 2.0 * np.pi * params['y0'] - params['FWHM']**2 * np.pi**2 * v/(2. * np.log(2.))) * vis])                          
     elif model_type == 'gauss': 
         u_maj = u*np.sin(params['PA']) + v*np.cos(params['PA'])
         u_min = u*np.cos(params['PA']) - v*np.sin(params['PA'])
-        return np.array([ (1j * 2.0 * np.pi * params['x0'] - params['FWHM_maj']**2 * np.pi**2 * u_maj/(2. * np.log(2.)) * np.sin(params['PA']) - params['FWHM_min']**2 * np.pi**2 * u_min/(2. * np.log(2.)) * np.cos(params['PA'])) * vis,
+        val = np.array([ (1j * 2.0 * np.pi * params['x0'] - params['FWHM_maj']**2 * np.pi**2 * u_maj/(2. * np.log(2.)) * np.sin(params['PA']) - params['FWHM_min']**2 * np.pi**2 * u_min/(2. * np.log(2.)) * np.cos(params['PA'])) * vis,
                           (1j * 2.0 * np.pi * params['y0'] - params['FWHM_maj']**2 * np.pi**2 * u_maj/(2. * np.log(2.)) * np.cos(params['PA']) + params['FWHM_min']**2 * np.pi**2 * u_min/(2. * np.log(2.)) * np.sin(params['PA'])) * vis])       
     elif model_type == 'disk': 
         # Take care of the degenerate origin point by a small offset
@@ -284,7 +444,7 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         uvdist = (u**2 + v**2)**0.5
         z = np.pi * params['d'] * uvdist
         bessel_deriv = 0.5 * (sps.jv( 0, z) - sps.jv( 2, z))
-        return np.array([ (1j * 2.0 * np.pi * params['x0'] - u/uvdist**2) * vis 
+        val = np.array([ (1j * 2.0 * np.pi * params['x0'] - u/uvdist**2) * vis 
                             + params['F0'] * 2./z * np.pi * params['d'] * u/uvdist * bessel_deriv * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                           (1j * 2.0 * np.pi * params['y0'] - v/uvdist**2) * vis 
                             + params['F0'] * 2./z * np.pi * params['d'] * v/uvdist * bessel_deriv * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) ])
@@ -293,7 +453,7 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         u += (u==0.)*(v==0.)*1e-10
         uvdist = (u**2 + v**2)**0.5
         z = np.pi * params['d'] * uvdist
-        return np.array([ 1j * 2.0 * np.pi * params['x0'] * vis 
+        val = np.array([ 1j * 2.0 * np.pi * params['x0'] * vis 
                             - params['F0'] * np.pi*params['d']*u/uvdist * sps.jv(1, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                           1j * 2.0 * np.pi * params['y0'] * vis 
                             - params['F0'] * np.pi*params['d']*v/uvdist * sps.jv(1, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) ])
@@ -302,7 +462,7 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         #Add a small offset to avoid issues with division by zero
         uvdist += (uvdist == 0.0) * 1e-10
         z = np.pi * params['d'] * uvdist
-        return np.array([ (1j * 2.0 * np.pi * params['x0'] - params['alpha']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis 
+        val = np.array([ (1j * 2.0 * np.pi * params['x0'] - params['alpha']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis 
                         - params['F0'] * np.pi*params['d']*u/uvdist * sps.jv(1, z) 
                                 * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.))) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                           (1j * 2.0 * np.pi * params['y0'] - params['alpha']**2 * np.pi**2 * v/(2. * np.log(2.))) * vis 
@@ -318,20 +478,48 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         dphidu =  v/uvdist**2 
         dphidv = -u/uvdist**2 
         z = np.pi * params['d'] * uvdist
-        return np.array([ 
-                 1j * 2.0 * np.pi * params['x0'] * vis 
-                    + params['F0'] * (-np.pi * params['d'] * u/uvdist * sps.jv(1, z)
+
+        if pol == 'I':
+            beta_factor_u = (-np.pi * params['d'] * u/uvdist * sps.jv(1, z)
                     + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * (-1j * m * dphidu) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-                    * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
-                 1j * 2.0 * np.pi * params['y0'] * vis 
-                    + params['F0'] * (-np.pi * params['d'] * v/uvdist * sps.jv(1, z)
+            beta_factor_v = (-np.pi * params['d'] * v/uvdist * sps.jv(1, z)
                     + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * (-1j * m * dphidv) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor_u = (-np.pi * params['d'] * u/uvdist * sps.jv(1, z) * params['beta_list_cpol'][0]
+                    + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * (-1j * m * dphidu) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+            beta_factor_v = (-np.pi * params['d'] * v/uvdist * sps.jv(1, z)
+                    + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * (-1j * m * dphidv) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor_u = (
+                      np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+                    + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0))
+            beta_factor_v = (
+                      np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+                    + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0))
+        else:
+            # Note: not all polarizations accounted for yet!
+            beta_factor_u = beta_factor_v = 0.0
+
+        val = np.array([ 
+                 1j * 2.0 * np.pi * params['x0'] * vis 
+                    + params['F0'] * beta_factor_u
+                    * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
+                 1j * 2.0 * np.pi * params['y0'] * vis 
+                    + params['F0'] * beta_factor_v
                     * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) ])
     elif model_type == 'thick_mring':
         # Take care of the degenerate origin point by a small offset
@@ -343,21 +531,49 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         dphidu =  v/uvdist**2
         dphidv = -u/uvdist**2
         z = np.pi * params['d'] * uvdist
-        return np.array([ 
-                 (1j * 2.0 * np.pi * params['x0'] - params['alpha']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis 
-                    + params['F0'] * (-np.pi * params['d'] * u/uvdist * sps.jv(1, z)
+
+        if pol == 'I':
+            beta_factor_u = (-np.pi * params['d'] * u/uvdist * sps.jv(1, z)
                     + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * (-1j * m * dphidu) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-                    * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-                    * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
-                 (1j * 2.0 * np.pi * params['y0'] - params['alpha']**2 * np.pi**2 * v/(2. * np.log(2.))) * vis 
-                    + params['F0'] * (-np.pi * params['d'] * v/uvdist * sps.jv(1, z)
+            beta_factor_v = (-np.pi * params['d'] * v/uvdist * sps.jv(1, z)
                     + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * (-1j * m * dphidv) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                     + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor_u = (-np.pi * params['d'] * u/uvdist * sps.jv(1, z) * params['beta_list_cpol'][0]
+                    + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * (-1j * m * dphidu) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+            beta_factor_v = (-np.pi * params['d'] * v/uvdist * sps.jv(1, z)
+                    + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * (-1j * m * dphidv) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+                    + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor_u = (0.0
+                    + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+                    + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * u/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0))
+            beta_factor_v = (0.0
+                    + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+                    + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0))
+        else:
+            # Note: not all polarizations accounted for yet!
+            beta_factor_u = beta_factor_v = 0.0
+
+        val = np.array([ 
+                 (1j * 2.0 * np.pi * params['x0'] - params['alpha']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis 
+                    + params['F0'] * beta_factor_u
+                    * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+                    * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
+                 (1j * 2.0 * np.pi * params['y0'] - params['alpha']**2 * np.pi**2 * v/(2. * np.log(2.))) * vis 
+                    + params['F0'] * beta_factor_v
                     * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
                     * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) ])
     elif model_type[:9] == 'stretched':
@@ -369,7 +585,7 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         (u_stretch, v_stretch) = stretch_uv(u,v,params)
         
         # First calculate the gradient of the unshifted but stretched image
-        grad0 = sample_1model_graduv_uv(u_stretch, v_stretch, model_type[10:], params_stretch) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
+        grad0 = sample_1model_graduv_uv(u_stretch, v_stretch, model_type[10:], params_stretch, pol=pol) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
         grad  = grad0.copy() * 0.0
         grad[0] = ( grad0[0] * (np.cos(params['stretch_PA'])**2 + np.sin(params['stretch_PA'])**2*params['stretch'])
                   + grad0[1] * ((params['stretch'] - 1.0) * np.cos(params['stretch_PA']) * np.sin(params['stretch_PA'])))
@@ -381,21 +597,22 @@ def sample_1model_graduv_uv(u, v, model_type, params):
         grad[0] += vis * 1j * 2.0 * np.pi * params['x0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
         grad[1] += vis * 1j * 2.0 * np.pi * params['y0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
 
-        return grad              
+        val = grad              
     else:
         print('Model ' + model_type + ' not recognized!')
-        return 0.0
+        val = 0.0
+    return val * get_const_polfac(model_type, params, pol)
 
-def sample_1model_grad_uv(u, v, model_type, params):
-    # Gradient of the model for each model parameter
+def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_cpol=False):
+    # Gradient of the model for each model parameter 
     if model_type == 'point': # F0, x0, y0
-        return np.array([ np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
+        val = np.array([ np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                  1j * 2.0 * np.pi * u * params['F0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                  1j * 2.0 * np.pi * v * params['F0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))])
     elif model_type == 'circ_gauss': # F0, FWHM, x0, y0
         gauss = (params['F0'] * np.exp(-np.pi**2/(4.*np.log(2.)) * (u**2 + v**2) * params['FWHM']**2)
                 *np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))
-        return np.array([ 1.0/params['F0'] * gauss,
+        val = np.array([ 1.0/params['F0'] * gauss,
                          -np.pi**2/(2.*np.log(2.)) * (u**2 + v**2) * params['FWHM'] * gauss,
                           1j * 2.0 * np.pi * u * gauss,
                           1j * 2.0 * np.pi * v * gauss])                          
@@ -405,7 +622,7 @@ def sample_1model_grad_uv(u, v, model_type, params):
         vis = (params['F0'] 
                * np.exp(-np.pi**2/(4.*np.log(2.)) * ((u_maj * params['FWHM_maj'])**2 + (u_min * params['FWHM_min'])**2))
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-        return np.array([ 1.0/params['F0'] * vis,
+        val = np.array([ 1.0/params['F0'] * vis,
                          -np.pi**2/(2.*np.log(2.)) * params['FWHM_maj'] * u_maj**2 * vis,
                          -np.pi**2/(2.*np.log(2.)) * params['FWHM_min'] * u_min**2 * vis,
                          -np.pi**2/(2.*np.log(2.)) * (params['FWHM_maj']**2 - params['FWHM_min']**2) * u_maj * u_min * vis,
@@ -417,13 +634,13 @@ def sample_1model_grad_uv(u, v, model_type, params):
         z += (z == 0.0) * 1e-10
         vis = (params['F0'] * 2.0/z * sps.jv(1, z) 
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-        return np.array([ 1.0/params['F0'] * vis,
+        val = np.array([ 1.0/params['F0'] * vis,
                          -(params['F0'] * 2.0/z * sps.jv(2, z) * np.pi * (u**2 + v**2)**0.5 * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) ,
                           1j * 2.0 * np.pi * u * vis,
                           1j * 2.0 * np.pi * v * vis])    
     elif model_type == 'ring': # F0, d, x0, y0
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
-        return np.array([ sps.jv(0, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])), 
+        val = np.array([ sps.jv(0, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])), 
                 -np.pi * (u**2 + v**2)**0.5 * params['F0'] * sps.jv(1, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])), 
                  2.0 * np.pi * 1j * u * params['F0'] * sps.jv(0, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])), 
                  2.0 * np.pi * 1j * v * params['F0'] * sps.jv(0, z) * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))])
@@ -432,83 +649,141 @@ def sample_1model_grad_uv(u, v, model_type, params):
         vis = (params['F0'] * sps.jv(0, z) 
                * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-        return np.array([ 1.0/params['F0'] * vis,
+        val = np.array([ 1.0/params['F0'] * vis,
                          -(params['F0'] * np.pi * (u**2 + v**2)**0.5 * sps.jv(1, z) 
                             * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
                             * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))),
                          -np.pi**2 * (u**2 + v**2) * params['alpha']/(2.*np.log(2.)) * vis,
                           1j * 2.0 * np.pi * u * vis,
                           1j * 2.0 * np.pi * v * vis])    
-    elif model_type == 'mring': # F0, d, x0, y0, beta1_re, beta1_im, beta2_re, beta2_im, ...
+    elif model_type in ['mring','thick_mring']: # F0, d, [alpha], x0, y0, beta1_re/abs, beta1_im/arg, beta2_re/abs, beta2_im/arg, ...
         phi = np.angle(v + 1j*u)
         # Flip the baseline sign to match eht-imaging conventions
         phi += np.pi
         uvdist = (u**2 + v**2)**0.5
         z = np.pi * params['d'] * uvdist
-        vis = (params['F0'] * (sps.jv(0, z) 
-               + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
-               + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-        grad = [ 1.0/params['F0'] * vis, 
-                (params['F0'] * (-np.pi * uvdist * sps.jv(1, z) 
-               + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
+        if model_type == 'thick_mring':
+            alpha_factor = np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+        else:
+            alpha_factor = 1
+
+        # Only one of the beta_lists will affect the measurement and have non-zero gradients. Figure out which:
+        # These are for the derivatives wrt diameter
+        if pol == 'I':
+            beta_factor = (-np.pi * uvdist * sps.jv(1, z) 
+               + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z)  - sps.jv(  m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv( -m-1, z) - sps.jv( -m+1, z)) * np.pi * uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-                * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))),
-                 1j * 2.0 * np.pi * u * vis, 
-                 1j * 2.0 * np.pi * v * vis]
-        # Add derivatives of the beta terms 
-        for m in range(1,len(params['beta_list'])+1):
-            beta_grad_re = params['F0'] * (
-               sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) + sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) 
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-            beta_grad_im = params['F0'] * (
-               sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) - sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) 
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-            grad.append(beta_grad_re)
-            grad.append(1j * beta_grad_im)
-        return np.array(grad)
-    elif model_type == 'thick_mring': # F0, d, alpha, x0, y0, beta1_re, beta1_im, beta2_re, beta2_im, ...
-        phi = np.angle(v + 1j*u)
-        # Flip the baseline sign to match eht-imaging conventions
-        phi += np.pi
-        uvdist = (u**2 + v**2)**0.5
-        z = np.pi * params['d'] * uvdist
-        vis = (params['F0'] * (sps.jv(0, z) 
-               + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
-               + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+            num_coeff = len(params['beta_list_pol'])
+            beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z)  - sps.jv(  m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
+        elif pol == 'V' and len(params['beta_list_cpol']) > 0:
+            beta_factor = (-np.pi * uvdist * sps.jv(1, z) * params['beta_list_cpol'][0] 
+               + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z)  - sps.jv(  m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
+               + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv( -m-1, z) - sps.jv( -m+1, z)) * np.pi * uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
+        else:
+            beta_factor = 0.0
+            
+        vis  = sample_1model_uv(u, v, model_type, params, pol=pol)
         grad = [ 1.0/params['F0'] * vis, 
-                 (params['F0'] * (-np.pi * uvdist * sps.jv(1, z) 
-               + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
-               + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))),
-                -np.pi**2/(2.*np.log(2)) * uvdist**2 * params['alpha'] * vis, 
-                 1j * 2.0 * np.pi * u * vis, 
-                 1j * 2.0 * np.pi * v * vis]
-        # Add derivatives of the beta terms 
-        for m in range(1,len(params['beta_list'])+1):
-            beta_grad_re = (params['F0'] * (sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) + sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)))
-               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))  
-            beta_grad_im = (params['F0'] * (sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) - sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)))
-               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-            grad.append(beta_grad_re)
-            grad.append(1j * beta_grad_im)
-        return np.array(grad)
+                 (params['F0'] * alpha_factor * beta_factor * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))]
+        if model_type == 'thick_mring':
+            grad.append(-np.pi**2/(2.*np.log(2)) * uvdist**2 * params['alpha'] * vis)
+        grad.append(1j * 2.0 * np.pi * u * vis)
+        grad.append(1j * 2.0 * np.pi * v * vis)
+
+        if pol=='I':
+            # Add derivatives of the beta terms 
+            for m in range(1,len(params['beta_list'])+1):
+                beta_grad_re =      params['F0'] * alpha_factor * (
+                   sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) + sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) 
+                   * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+                beta_grad_im = 1j * params['F0'] * alpha_factor * (
+                   sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) - sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) 
+                   * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+                if COMPLEX_BASIS == 're-im':
+                    grad.append(beta_grad_re)
+                    grad.append(beta_grad_im)
+                elif COMPLEX_BASIS == 'abs-arg':
+                    beta_abs = np.abs(params['beta_list'][m-1])
+                    beta_arg = np.angle(params['beta_list'][m-1])
+                    grad.append(beta_grad_re * np.cos(beta_arg) + beta_grad_im * np.sin(beta_arg))
+                    grad.append(-beta_abs * np.sin(beta_arg) * beta_grad_re + beta_abs * np.cos(beta_arg) * beta_grad_im)
+                else:
+                    raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
+        else:
+            [grad.append(np.zeros_like(grad[0])) for _ in range(2*len(params['beta_list']))]
+
+        if pol=='P' and fit_pol:
+            # Add derivatives of the beta terms 
+            num_coeff = len(params['beta_list_pol'])
+            for m in range(-(num_coeff-1)//2,(num_coeff+1)//2):
+                beta_grad_re = params['F0'] * alpha_factor * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) 
+                beta_grad_im = 1j * beta_grad_re
+                if COMPLEX_BASIS == 're-im':
+                    grad.append(beta_grad_re)
+                    grad.append(beta_grad_im)
+                elif COMPLEX_BASIS == 'abs-arg':
+                    beta_abs = np.abs(params['beta_list_pol'][m+(num_coeff-1)//2])
+                    beta_arg = np.angle(params['beta_list_pol'][m+(num_coeff-1)//2])
+                    grad.append(beta_grad_re * np.cos(beta_arg) + beta_grad_im * np.sin(beta_arg))
+                    grad.append(-beta_abs * np.sin(beta_arg) * beta_grad_re + beta_abs * np.cos(beta_arg) * beta_grad_im)
+                else:
+                    raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
+        elif pol!='P' and fit_pol:
+            [grad.append(np.zeros_like(grad[0])) for _ in range(2*len(params['beta_list_pol']))]
+
+        val = np.array(grad)
+
+#    elif model_type == 'thick_mring': # F0, d, alpha, x0, y0, beta1_re, beta1_im, beta2_re, beta2_im, ...
+#        phi = np.angle(v + 1j*u)
+#        # Flip the baseline sign to match eht-imaging conventions
+#        phi += np.pi
+#        uvdist = (u**2 + v**2)**0.5
+#        z = np.pi * params['d'] * uvdist
+#        vis = (params['F0'] * (sps.jv(0, z) 
+#               + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
+#               + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+#        grad = [ 1.0/params['F0'] * vis, 
+#                 (params['F0'] * (-np.pi * uvdist * sps.jv(1, z) 
+#               + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
+#               + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
+#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))),
+#                -np.pi**2/(2.*np.log(2)) * uvdist**2 * params['alpha'] * vis, 
+#                 1j * 2.0 * np.pi * u * vis, 
+#                 1j * 2.0 * np.pi * v * vis]
+#        # Add derivatives of the beta terms 
+#        for m in range(1,len(params['beta_list'])+1):
+#            beta_grad_re =      (params['F0'] * (sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) + sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)))
+#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))  
+#            beta_grad_im = 1j * (params['F0'] * (sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) - sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)))
+#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+#            if COMPLEX_BASIS == 're-im':
+#                grad.append(beta_grad_re)
+#                grad.append(beta_grad_im)
+#            elif COMPLEX_BASIS == 'abs-arg':
+#                beta_abs = np.abs(params['beta_list'][m-1])
+#                beta_arg = np.angle(params['beta_list'][m-1])
+#                grad.append(beta_grad_re * np.cos(beta_arg) + beta_grad_im * np.sin(beta_arg))
+#                grad.append(-beta_abs * np.sin(beta_arg) * beta_grad_re + beta_abs * np.cos(beta_arg) * beta_grad_im)
+#            else:
+#                raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
+#        val = np.array(grad)
     elif model_type[:9] == 'stretched':
         # Start with the model visibility
-        vis  = sample_1model_uv(u, v, model_type, params)
+        vis  = sample_1model_uv(u, v, model_type, params, pol=pol)
 
         # Next, calculate the gradient wrt model parameters other than stretch and stretch_PA
         # These are the same as the gradient of the unstretched model on stretched baselines
-        params_stretch = params.copy()        
+        params_stretch = params.copy()
         params_stretch['x0'] = 0.0
         params_stretch['y0'] = 0.0
         (u_stretch, v_stretch) = stretch_uv(u,v,params)
-        grad = (sample_1model_grad_uv(u_stretch, v_stretch, model_type[10:], params_stretch)
+        grad = (sample_1model_grad_uv(u_stretch, v_stretch, model_type[10:], params_stretch, pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol)
                 * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))
 
         # Add the gradient terms for the centroid
@@ -516,8 +791,7 @@ def sample_1model_grad_uv(u, v, model_type, params):
         grad[model_params(model_type, params).index('y0')] = 1j * 2.0 * np.pi * v * vis
 
         # Now calculate the gradient with respect to stretch and stretch PA
-        grad_uv = sample_1model_graduv_uv(u_stretch, v_stretch, model_type[10:], params_stretch)
-        #grad_uv = sample_1model_graduv_uv(u, v, model_type, params)                   
+        grad_uv = sample_1model_graduv_uv(u_stretch, v_stretch, model_type[10:], params_stretch, pol=pol)
         grad_stretch = grad_uv.copy() * 0.0 
         grad_stretch[0] = ( grad_uv[0] * (u * np.sin(params['stretch_PA'])**2 + v * np.sin(params['stretch_PA']) * np.cos(params['stretch_PA']))
                           + grad_uv[1] * (v * np.cos(params['stretch_PA'])**2 + u * np.sin(params['stretch_PA']) * np.cos(params['stretch_PA'])))
@@ -526,35 +800,47 @@ def sample_1model_grad_uv(u, v, model_type, params):
         grad_stretch[1] = ( grad_uv[0] * (params['stretch'] - 1.0) * ( u * np.sin(2.0 * params['stretch_PA']) + v * np.cos(2.0 * params['stretch_PA']))
                           + grad_uv[1] * (params['stretch'] - 1.0) * (-v * np.sin(2.0 * params['stretch_PA']) + u * np.cos(2.0 * params['stretch_PA'])))
         grad_stretch[1] *= np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
-#        grad  = grad0.copy() * 0.0
-#        grad[0] = ( grad0[0] * (np.cos(params['stretch_PA'])**2 + np.sin(params['stretch_PA'])**2*params['stretch'])
-#                  + grad0[1] * ((params['stretch'] - 1.0) * np.cos(params['stretch_PA']) * np.sin(params['stretch_PA'])))
-#        grad[1] = ( grad0[1] * (np.cos(params['stretch_PA'])**2*params['stretch'] + np.sin(params['stretch_PA'])**2)
-#                  + grad0[0] * ((params['stretch'] - 1.0) * np.cos(params['stretch_PA']) * np.sin(params['stretch_PA'])))
 
-#        # Add the gradient term from the shift
-#        vis = sample_1model_uv(u_stretch, v_stretch, model_type[10:], params_stretch) 
-#        grad[0] += vis * 1j * 2.0 * np.pi * params['x0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
-#        grad[1] += vis * 1j * 2.0 * np.pi * params['y0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
-
-        return np.concatenate([grad, grad_stretch])
+        val = np.concatenate([grad, grad_stretch])
     else:
         print('Model ' + model_type + ' not recognized!')
-        return 0.0
+        val = 0.0
 
-def sample_model_xy(models, params, x, y, psize=1.*RADPERUAS):
-    return np.sum(sample_1model_xy(x, y, models[j], params[j], psize=psize) for j in range(len(models)))
+    grad = val * get_const_polfac(model_type, params, pol)
 
-def sample_model_uv(models, params, u, v):
-    return np.sum(sample_1model_uv(u, v, models[j], params[j]) for j in range(len(models)))
+    if (fit_pol or fit_cpol) and model_type.find('mring') == -1:
+        # Add gradient contributions for models that have constant polarization
+        if fit_pol:
+            # Add gradient wrt pol_frac if the polarization is P, otherwise ignore
+            grad_params = dict(params)
+            grad_params['pol_frac'] = 1.0
+            grad = np.vstack([grad, (pol == 'P') * sample_1model_uv(u, v, model_type, grad_params, pol=pol)])
 
-def sample_model_graduv_uv(models, params, u, v):
+            # Add gradient wrt pol_evpa if the polarization is P, otherwise ignore
+            grad_params = dict(params)
+            grad_params['pol_frac'] *= 2j
+            grad = np.vstack([grad, (pol == 'P') * sample_1model_uv(u, v, model_type, grad_params, pol=pol)])
+        if fit_cpol:
+            # Add gradient wrt cpol_frac
+            grad_params = dict(params)
+            grad_params['cpol_frac'] = 1.0
+            grad = np.vstack([grad, (pol == 'V') * sample_1model_uv(u, v, model_type, grad_params, pol=pol)])
+
+    return grad
+
+def sample_model_xy(models, params, x, y, psize=1.*RADPERUAS, pol='I'):
+    return np.sum(sample_1model_xy(x, y, models[j], params[j], psize=psize,pol=pol) for j in range(len(models)))
+
+def sample_model_uv(models, params, u, v, pol='I'):
+    return np.sum(sample_1model_uv(u, v, models[j], params[j], pol=pol) for j in range(len(models)))
+
+def sample_model_graduv_uv(models, params, u, v, pol='I'):
     # Gradient of a sum of models wrt (u,v)
-    return np.sum([sample_1model_graduv_uv(u, v, models[j], params[j]) for j in range(len(models))],axis=0)
+    return np.sum([sample_1model_graduv_uv(u, v, models[j], params[j], pol=pol) for j in range(len(models))],axis=0)
 
-def sample_model_grad_uv(models, params, u, v):
+def sample_model_grad_uv(models, params, u, v, pol='I', fit_pol=False, fit_cpol=False):
     # Gradient of a sum of models for each parameter
-    return np.concatenate([sample_1model_grad_uv(u, v, models[j], params[j]) for j in range(len(models))])
+    return np.concatenate([sample_1model_grad_uv(u, v, models[j], params[j], pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol) for j in range(len(models))])
 
 def blur_circ_1model(model_type, params, fwhm):
     """Blur a single model, returning new model type and associated parameters
@@ -695,12 +981,11 @@ class Model(object):
         """
         return np.sum([self.params[j]['F0'] for j in range(self.N_models())])
 
-    def blur_circ(self, fwhm_i, fwhm_pol=0):
+    def blur_circ(self, fwhm):
         """Return a new model, equal to the current one convolved with a circular Gaussian kernel
 
            Args:
                 fwhm (float) : Full width at half maximum of the kernel (radians)
-                fwhm_pol (float): Beam size for Stokes Q,U,V blurring kernel
 
            Returns:
                 (Model) : Blurred model
@@ -708,25 +993,14 @@ class Model(object):
 
         out = self.copy()
 
-        # Blur the primary image
         for j in range(len(out.models)):
-            blur_model = blur_circ_1model(out.models[j], out.params[j], fwhm_i)
+            blur_model = blur_circ_1model(out.models[j], out.params[j], fwhm)
             out.models[j] = blur_model['model_type']
             out.params[j] = blur_model['params']
 
-        # Blur all polarizations and copy over
-        for pol in list(self._imdict.keys()):
-            if pol==out.pol_prim: continue
-            for j in range(len(out._imdict[pol]['models'])):
-                blur_model = blur_circ_1model(out._imdict[pol]['models'][j], out._imdict[pol]['params'], fwhm_i)
-                out._imdict[pol]['models'][j] = blur_model['model_type']
-                out._imdict[pol]['models'][j] = blur_model['params']
-
         return out
 
-
-
-    def add_point(self, F0 = 1.0, x0 = 0.0, y0 = 0.0):
+    def add_point(self, F0 = 1.0, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a point source model.
 
            Args:
@@ -740,10 +1014,10 @@ class Model(object):
 
         out = self.copy()
         out.models.append('point')
-        out.params.append({'F0':F0,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_circ_gauss(self, F0 = 1.0, FWHM = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0):
+    def add_circ_gauss(self, F0 = 1.0, FWHM = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a circular Gaussian model.
 
            Args:
@@ -757,10 +1031,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('circ_gauss')
-        out.params.append({'F0':F0,'FWHM':FWHM,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'FWHM':FWHM,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_gauss(self, F0 = 1.0, FWHM_maj = 50.*RADPERUAS, FWHM_min = 50.*RADPERUAS, PA = 0.0, x0 = 0.0, y0 = 0.0):
+    def add_gauss(self, F0 = 1.0, FWHM_maj = 50.*RADPERUAS, FWHM_min = 50.*RADPERUAS, PA = 0.0, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add an anisotropic Gaussian model.
 
            Args:
@@ -776,10 +1050,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('gauss')
-        out.params.append({'F0':F0,'FWHM_maj':FWHM_maj,'FWHM_min':FWHM_min,'PA':PA,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'FWHM_maj':FWHM_maj,'FWHM_min':FWHM_min,'PA':PA,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_disk(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0):
+    def add_disk(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a circular disk model.
 
            Args:
@@ -793,10 +1067,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('disk')
-        out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_ring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0):
+    def add_ring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a ring model with infinitesimal thickness.
 
            Args:
@@ -810,10 +1084,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('ring')
-        out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_stretched_ring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, stretch = 1.0, stretch_PA = 0.0):
+    def add_stretched_ring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, stretch = 1.0, stretch_PA = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a stretched ring model with infinitesimal thickness.
 
            Args:
@@ -829,10 +1103,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('stretched_ring')
-        out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA})
+        out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_thick_ring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0):
+    def add_thick_ring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a ring model with finite thickness, determined by circular Gaussian convolution of a thin ring.
            For details, see Appendix G of https://iopscience.iop.org/article/10.3847/2041-8213/ab0e85/pdf
 
@@ -848,10 +1122,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('thick_ring')
-        out.params.append({'F0':F0,'d':d,'alpha':alpha,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'d':d,'alpha':alpha,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_stretched_thick_ring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, stretch = 1.0, stretch_PA = 0.0):
+    def add_stretched_thick_ring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, stretch = 1.0, stretch_PA = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
         """Add a ring model with finite thickness, determined by circular Gaussian convolution of a thin ring.
            For details, see Appendix G of https://iopscience.iop.org/article/10.3847/2041-8213/ab0e85/pdf
 
@@ -869,10 +1143,10 @@ class Model(object):
         """
         out = self.copy()
         out.models.append('stretched_thick_ring')
-        out.params.append({'F0':F0,'d':d,'alpha':alpha,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA})
+        out.params.append({'F0':F0,'d':d,'alpha':alpha,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
-    def add_mring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None):
+    def add_mring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None, beta_list_pol = None, beta_list_cpol = None):
         """Add a ring model with azimuthal brightness variations determined by a Fourier mode expansion.
            For details, see Eq. 18-20 of https://arxiv.org/abs/1907.04329
 
@@ -887,14 +1161,18 @@ class Model(object):
            Returns:
                 (Model): Updated Model
         """
+        if beta_list is None: beta_list = []
+        if beta_list_pol is None: beta_list_pol = []
+        if beta_list_cpol is None: beta_list_cpol = []
+
         out = self.copy()
         if beta_list is None:
             beta_list = [0.0]
         out.models.append('mring')
-        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'beta_list_pol':beta_list_pol,'beta_list_cpol':beta_list_cpol,'x0':x0,'y0':y0})
         return out
 
-    def add_stretched_mring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None, stretch = 1.0, stretch_PA = 0.0):
+    def add_stretched_mring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None, beta_list_pol = None, beta_list_cpol = None, stretch = 1.0, stretch_PA = 0.0):
         """Add a stretched ring model with azimuthal brightness variations determined by a Fourier mode expansion.
            For details, see Eq. 18-20 of https://arxiv.org/abs/1907.04329
 
@@ -911,14 +1189,18 @@ class Model(object):
            Returns:
                 (Model): Updated Model
         """
+        if beta_list is None: beta_list = []
+        if beta_list_pol is None: beta_list_pol = []
+        if beta_list_cpol is None: beta_list_cpol = []
+
         out = self.copy()
         if beta_list is None:
             beta_list = [0.0]
         out.models.append('stretched_mring')
-        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA})
+        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'beta_list_pol':beta_list_pol,'beta_list_cpol':beta_list_cpol,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA})
         return out
 
-    def add_thick_mring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None):
+    def add_thick_mring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None, beta_list_pol = None, beta_list_cpol = None):
         """Add a ring model with azimuthal brightness variations determined by a Fourier mode expansion and thickness determined by circular Gaussian convolution.
            For details, see Eq. 18-20 of https://arxiv.org/abs/1907.04329
            The Gaussian convolution calculation is a trivial generalization of Appendix G of https://iopscience.iop.org/article/10.3847/2041-8213/ab0e85/pdf
@@ -935,14 +1217,18 @@ class Model(object):
            Returns:
                 (Model): Updated Model
         """
+        if beta_list is None: beta_list = []
+        if beta_list_pol is None: beta_list_pol = []
+        if beta_list_cpol is None: beta_list_cpol = []
+
         out = self.copy()
         if beta_list is None:
             beta_list = [0.0]
         out.models.append('thick_mring')
-        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'alpha':alpha,'x0':x0,'y0':y0})
+        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'beta_list_pol':beta_list_pol,'beta_list_cpol':beta_list_cpol,'alpha':alpha,'x0':x0,'y0':y0})
         return out
 
-    def add_stretched_thick_mring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None, stretch = 1.0, stretch_PA = 0.0):
+    def add_stretched_thick_mring(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, beta_list = None, beta_list_pol = None, beta_list_cpol = None, stretch = 1.0, stretch_PA = 0.0):
         """Add a ring model with azimuthal brightness variations determined by a Fourier mode expansion and thickness determined by circular Gaussian convolution.
            For details, see Eq. 18-20 of https://arxiv.org/abs/1907.04329
            The Gaussian convolution calculation is a trivial generalization of Appendix G of https://iopscience.iop.org/article/10.3847/2041-8213/ab0e85/pdf
@@ -961,14 +1247,18 @@ class Model(object):
            Returns:
                 (Model): Updated Model
         """
+        if beta_list is None: beta_list = []
+        if beta_list_pol is None: beta_list_pol = []
+        if beta_list_cpol is None: beta_list_cpol = []
+
         out = self.copy()
         if beta_list is None:
             beta_list = [0.0]
         out.models.append('stretched_thick_mring')
-        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'alpha':alpha,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA})
+        out.params.append({'F0':F0,'d':d,'beta_list':beta_list,'beta_list_pol':beta_list_pol,'beta_list_cpol':beta_list_cpol,'alpha':alpha,'x0':x0,'y0':y0,'stretch':stretch,'stretch_PA':stretch_PA})
         return out
 
-    def sample_xy(self, x, y, psize=1.*RADPERUAS):
+    def sample_xy(self, x, y, psize=1.*RADPERUAS, pol='I'):
         """Sample model image on the specified x and y coordinates
 
            Args:
@@ -978,9 +1268,9 @@ class Model(object):
            Returns:
                (float): Image brightness (Jy/radian^2)
         """  
-        return sample_model_xy(self.models, self.params, x, y, psize=psize)
+        return sample_model_xy(self.models, self.params, x, y, psize=psize, pol=pol)
 
-    def sample_uv(self, u, v):
+    def sample_uv(self, u, v, polrep_obs='Stokes', pol='I'):
         """Sample model visibility on the specified u and v coordinates
 
            Args:
@@ -990,9 +1280,9 @@ class Model(object):
            Returns:
                (complex): complex visibility (Jy)
         """   
-        return sample_model_uv(self.models, self.params, u, v)
+        return sample_model_uv(self.models, self.params, u, v, pol=pol)
 
-    def sample_graduv_uv(self, u, v):
+    def sample_graduv_uv(self, u, v, pol='I'):
         """Sample model visibility gradient on the specified u and v coordinates wrt (u,v)
 
            Args:
@@ -1002,9 +1292,9 @@ class Model(object):
            Returns:
                (complex): complex visibility (Jy)
         """   
-        return sample_model_graduv_uv(self.models, self.params, u, v)
+        return sample_model_graduv_uv(self.models, self.params, u, v, pol=pol)
 
-    def sample_grad_uv(self, u, v):
+    def sample_grad_uv(self, u, v, pol='I', fit_pol=False, fit_cpol=False):
         """Sample model visibility gradient on the specified u and v coordinates wrt all model parameters
 
            Args:
@@ -1014,7 +1304,7 @@ class Model(object):
            Returns:
                (complex): complex visibility (Jy)
         """   
-        return sample_model_grad_uv(self.models, self.params, u, v)
+        return sample_model_grad_uv(self.models, self.params, u, v, pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol)
 
     def centroid(self, pol=None):
         """Compute the location of the image centroid (corresponding to the polarization pol)
@@ -1034,8 +1324,8 @@ class Model(object):
 
         return np.real(self.sample_graduv_uv(0,0)/(2.*np.pi*1j))/self.total_flux()
 
-    def default_prior(self):
-        return [default_prior(self.models[j],self.params[j]) for j in range(self.N_models())]        
+    def default_prior(self,fit_pol=False,fit_cpol=False):
+        return [default_prior(self.models[j],self.params[j],fit_pol=fit_pol,fit_cpol=fit_cpol) for j in range(self.N_models())]        
 
     def display(self, fov=FOV_DEFAULT, npix=NPIX_DEFAULT, polrep='stokes', pol_prim=None, pulse=PULSE_DEFAULT, time=0., **kwargs):        
         return self.make_image(fov, npix, polrep, pol_prim, pulse, time).display(**kwargs)
@@ -1086,8 +1376,11 @@ class Model(object):
 
         x_grid, y_grid = np.meshgrid(xlist, ylist)
         imarr = self.sample_xy(x_grid, y_grid, im.psize)    
-
         out.imvec = imarr.flatten() # Change this to init with image_args 
+
+        # Add the remaining polarizations
+        for pol in ['Q','U','V']:
+            out.add_pol_image(self.sample_xy(x_grid, y_grid, im.psize, pol=pol), pol)
 
         return out
 
@@ -1105,13 +1398,19 @@ class Model(object):
         obsdata = copy.deepcopy(obs.data)
 
         # Compute visibilities
-        data = self.sample_uv(obs.data['u'], obs.data['v'])
+        data = self.sample_uv(obs.data['u'], obs.data['v'], polrep_obs=obs.polrep)
 
         # put visibilities into the obsdata
         if obs.polrep=='stokes':
-            obsdata['vis'] = data
+            obsdata['vis']  = self.sample_uv(obs.data['u'], obs.data['v'], pol='I')
+            obsdata['qvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='Q')
+            obsdata['uvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='U')
+            obsdata['vvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='V')
         elif obs.polrep=='circ':
-            obsdata['rrvis'] = data
+            obsdata['rrvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='RR')
+            obsdata['rlvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='RL')
+            obsdata['lrvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='LR')
+            obsdata['llvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='LL')
 
         obs_no_noise = ehtim.obsdata.Obsdata(obs.ra, obs.dec, obs.rf, obs.bw, obsdata, obs.tarr,
                                              source=obs.source, mjd=obs.mjd, polrep=obs.polrep,

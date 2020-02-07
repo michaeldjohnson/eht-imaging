@@ -1,7 +1,7 @@
 # modeling_utils.py
 # General modeling functions for total intensity VLBI data
 #
-#    Copyright (C) 2018 Andrew Chael
+#    Copyright (C) 2020 Michael Johnson
 #
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -29,7 +29,6 @@ import scipy.optimize as opt
 import scipy.ndimage as nd
 import scipy.ndimage.filters as filt
 import matplotlib.pyplot as plt
-#from  scipy.special import jv
 import scipy.special as sps
 
 import ehtim.image as image
@@ -46,9 +45,9 @@ from IPython import display
 # Constants & Definitions
 ##################################################################################################
 
-MAXLS = 100 # maximum number of line searches in L-BFGS-B
-NHIST = 100 # number of steps to store for hessian approx
-MAXIT = 100 # maximum number of iterations
+MAXLS = 100  # maximum number of line searches in L-BFGS-B
+NHIST = 100  # number of steps to store for hessian approx
+MAXIT = 100  # maximum number of iterations
 STOP = 1.e-8 # convergence criterion
 
 BOUNDS_MIN = -1e4
@@ -58,18 +57,30 @@ BOUNDS_EXP_NSIGMA = 10.
 
 PRIOR_MIN = 1e-200 # to avoid problems with log-prior
 
-DATATERMS = ['vis', 'bs', 'amp', 'cphase', 'cphase_diag', 'camp', 'logcamp', 'logcamp_diag', 'logamp']
+DATATERMS = ['vis', 'bs', 'amp', 'cphase', 'cphase_diag', 'camp', 'logcamp', 'logcamp_diag', 'logamp', 'pvis', 'm']
 
-nit = 0 # global variable to track the iteration number in the plotting callback
+nit = 0       # global variable to track the iteration number in the plotting callback
+globdict = {} # global dictionary with all parameters related to the model fitting
 
 # Details on each fitted parameter (convenience rescaling factor and associated unit)
-PARAM_DETAILS = {'F0':[1.,'Jy'], 'FWHM':[RADPERUAS,'uas'], 'FWHM_maj':[RADPERUAS,'uas'], 'FWHM_min':[RADPERUAS,'uas'], 'd':[RADPERUAS,'uas'], 'PA':[np.pi/180.,'deg'], 'alpha':[RADPERUAS,'uas'], 'x0':[RADPERUAS,'uas'], 'y0':[RADPERUAS,'uas'], 'stretch':[1.,''], 'stretch_PA':[np.pi/180.,'deg']}
+PARAM_DETAILS = {'F0':[1.,'Jy'], 'FWHM':[RADPERUAS,'uas'], 'FWHM_maj':[RADPERUAS,'uas'], 'FWHM_min':[RADPERUAS,'uas'], 'd':[RADPERUAS,'uas'], 'PA':[np.pi/180.,'deg'], 'alpha':[RADPERUAS,'uas'], 'x0':[RADPERUAS,'uas'], 'y0':[RADPERUAS,'uas'], 'stretch':[1.,''], 'stretch_PA':[np.pi/180.,'deg'], 'arg':[np.pi/180.,'deg'], 'evpa':[np.pi/180.,'deg']}
+
+GAIN_PRIOR_DEFAULT = {'prior_type':'exponential','std':0.1} 
 
 ##################################################################################################
 # Priors
 ##################################################################################################
 
 def cdf(x, prior_params):
+    """Compute the cumulative distribution function CDF(x) of a given prior at a given point x
+
+       Args:
+           x (float): Value at which to compute the CDF 
+           prior_params (dict): Dictionary with information about the prior
+
+       Returns:
+           float: CDF(x)
+    """   
     if prior_params['prior_type'] == 'flat':
         return (  (x > prior_params['max']) * 1.0   
                 + (x > prior_params['min']) * (x < prior_params['max']) * (x - prior_params['min'])/(prior_params['max'] - prior_params['min']))
@@ -87,6 +98,15 @@ def cdf(x, prior_params):
         raise Exception('Prior type ' + prior_params['prior_type'] + ' not recognized!')
 
 def cdf_inverse(x, prior_params):
+    """Compute the inverse cumulative distribution function of a given prior at a given point 0 <= x <= 1
+
+       Args:
+           x (float): Value at which to compute the inverse CDF 
+           prior_params (dict): Dictionary with information about the prior
+
+       Returns:
+           float: Inverse CDF at x
+    """   
     if prior_params['prior_type'] == 'flat':
         return prior_params['min'] * (1.0 - x) + prior_params['max'] * x
     elif prior_params['prior_type'] == 'gauss':
@@ -103,6 +123,14 @@ def cdf_inverse(x, prior_params):
         raise Exception('Prior type ' + prior_params['prior_type'] + ' not recognized!')
 
 def param_bounds(prior_params):
+    """Compute the parameter boundaries associated with a given prior
+
+       Args:
+           prior_params (dict): Dictionary with information about the prior
+
+       Returns:
+           list: 2-element list specifying the allowed parameter range: [min,max]
+    """   
     if prior_params.get('transform','') == 'cdf':
         bounds = [0.0, 1.0]
     elif prior_params['prior_type'] == 'flat':
@@ -124,6 +152,16 @@ def param_bounds(prior_params):
     return bounds
 
 def prior_func(x, prior_params):
+    """Compute the value of a 1-D prior P(x) at a specified value x.
+
+       Args:
+           x (float): Value at which to compute the prior
+           prior_params (dict): Dictionary with information about the prior
+
+       Returns:
+           float: Prior value P(x) 
+    """   
+
     if prior_params['prior_type'] == 'flat':
         return (x > prior_params['min']) * (x < prior_params['max']) * 1.0/(prior_params['max'] - prior_params['min']) + PRIOR_MIN
     elif prior_params['prior_type'] == 'gauss':
@@ -141,6 +179,16 @@ def prior_func(x, prior_params):
         return 1.0
 
 def prior_grad_func(x, prior_params):
+    """Compute the value of the derivative of a 1-D prior, dP/dx at a specified value x.
+
+       Args:
+           x (float): Value at which to compute the prior derivative
+           prior_params (dict): Dictionary with information about the prior
+
+       Returns:
+           float: Prior derivative value dP/dx(x) 
+    """   
+
     if prior_params['prior_type'] == 'flat':
         return 0.0
     elif prior_params['prior_type'] == 'gauss':
@@ -158,6 +206,17 @@ def prior_grad_func(x, prior_params):
         return 0.0
 
 def transform_param(x, x_prior, inverse=True):
+    """Compute a specified coordinate transformation T(x) of a parameter value x
+
+       Args:
+           x (float): Untransformed value
+           x_prior (dict): Dictionary with information about the transformation
+           inverse (bool): Whether to compute the forward or inverse transform. 
+
+       Returns:
+           float: Transformed parameter value
+    """  
+
     try:
         transform = x_prior['transform']
     except:
@@ -178,6 +237,16 @@ def transform_param(x, x_prior, inverse=True):
         return x
 
 def transform_grad_param(x, x_prior):
+    """Compute the gradient of a specified coordinate transformation T(x) of a parameter value x
+
+       Args:
+           x (float): Untransformed value
+           x_prior (dict): Dictionary with information about the transformation
+
+       Returns:
+           float: Gradient of transformation, dT/dx(x)
+    """  
+
     try:
         transform = x_prior['transform']
     except:
@@ -192,17 +261,442 @@ def transform_grad_param(x, x_prior):
         return 1.0        
 
 ##################################################################################################
+# Helper functions
+##################################################################################################
+def selfcal(Obsdata, model,
+            gain_init=None, gain_prior=None,
+            minimizer_func='scipy.optimize.minimize', minimizer_kwargs=None,
+            bounds=None, use_bounds=True,
+            processes=-1, msgtype='bar', quiet=True, **kwargs):
+    """Self-calibrate a specified observation to a given model, accounting for gain priors
+
+       Args:
+
+       Returns:
+    """  
+
+    # This is just a convenience function. It will call modeler_func() scan-by-scan fitting only gains.
+    # This function differs from ehtim.calibrating.self_cal in the inclusion of gain priors
+    tlist = Obsdata.tlist()
+    res_list = []
+    for j in range(len(tlist)):
+        if msgtype not in ['none','']:
+            prog_msg(j, len(tlist), msgtype, j-1)
+        obs = Obsdata.copy()
+        obs.data = tlist[j]
+        res_list.append(modeler_func(obs, model, model_prior=None, d1='amp', 
+                   fit_model=False, fit_gains=True,gain_init=gain_init,gain_prior=gain_prior,
+                   minimizer_func=minimizer_func, minimizer_kwargs=minimizer_kwargs,
+                   bounds=bounds, use_bounds=use_bounds, processes=-1, quiet=quiet, **kwargs))
+
+    # Assemble a single caltable to return
+    allsites = Obsdata.tarr['site']
+    caldict = res_list[0]['caltable'].data
+    for j in range(1,len(tlist)):
+        row = res_list[j]['caltable'].data
+        for site in allsites:
+            try: dat = row[site]
+            except KeyError: continue
+
+            try: caldict[site] = np.append(caldict[site], row[site])
+            except KeyError: caldict[site] = dat
+
+    caltable = ehtim.caltable.Caltable(obs.ra, obs.dec, obs.rf, obs.bw, caldict, obs.tarr,
+                                       source=obs.source, mjd=obs.mjd, timetype=obs.timetype)
+
+    return caltable
+
+def make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol=False, fit_cpol=False):
+    # Define the mapping between solved parameters and the model
+    # Each fitted model parameter is rescaled to give values closer to order unity
+    param_map = []  # Define mapping for every fitted parameter: model component #, parameter name, rescale multiplier internal, unit, rescale multiplier external
+    param_mask = [] # True or False for whether to fit each model parameter  
+    for j in range(model_init.N_models()):
+        params = model.model_params(model_init.models[j],model_init.params[j], fit_pol=fit_pol, fit_cpol=fit_cpol)
+        for param in params:
+            if fit_model == False:
+                param_mask.append(False)        
+            elif model_prior[j][param]['prior_type'] != 'fixed':
+                param_mask.append(True)
+                param_type = param
+                if len(param_type.split('_')) == 2:
+                    param_type = param_type.split('_')[1]
+                try:
+                    if model_prior[j][param].get('transform','') == 'cdf' or minimizer_func in ['dynesty_static','dynesty_dynamic']:
+                        param_map.append([j,param,1,PARAM_DETAILS[param_type][1],PARAM_DETAILS[param_type][0]])
+                    else:
+                        param_map.append([j,param,PARAM_DETAILS[param_type][0],PARAM_DETAILS[param_type][1],PARAM_DETAILS[param_type][0]])
+                except:
+                    param_map.append([j,param,1,'',1])
+                    pass
+            else:
+                param_mask.append(False)
+    return (param_map, param_mask)
+
+def likelihood_terms(d1, d2, d3, sigma1, sigma2, sigma3):
+    # Compute the correct data weights and extra constant for the log-likelihood
+    alpha_d1 = alpha_d2 = alpha_d3 = ln_norm1 = ln_norm2 = ln_norm3 = 0.0
+
+    try: 
+        alpha_d1 = 0.5 * len(sigma1)
+        ln_norm1 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma1))
+    except: pass
+    try: 
+        alpha_d2 = 0.5 * len(sigma2)
+        ln_norm2 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma2))
+    except: pass
+    try: 
+        alpha_d3 = 0.5 * len(sigma3)        
+        ln_norm3 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma3))
+    except: pass
+
+    if d1 in ['vis','bs','m','pvis']:
+        alpha_d1 *= 2
+        ln_norm1 *= 2
+    if d2 in ['vis','bs','m','pvis']:
+        alpha_d2 *= 2
+        ln_norm2 *= 2
+    if d3 in ['vis','bs','m','pvis']:
+        alpha_d3 *= 2
+        ln_norm3 *= 2
+    ln_norm = ln_norm1 + ln_norm2 + ln_norm3
+
+    return (alpha_d1, alpha_d2, alpha_d3, ln_norm)
+
+def default_gain_prior(sites):
+    print('No gain prior specified. Defaulting to ' + str(GAIN_PRIOR_DEFAULT) + ' for all sites.')
+    gain_prior = {}
+    for site in sites:
+        gain_prior[site] = GAIN_PRIOR_DEFAULT
+    return gain_prior
+
+def caltable_to_gains(caltab, gain_list):
+    # Generate an ordered list of gains from a caltable
+    # gain_list is a set of tuples (time, site)
+    gains = [np.abs(caltab.data[site]['rscale'][caltab.data[site]['time'] == time][0]) - 1.0 for (time, site) in gain_list]
+    return gains
+
+def make_gain_map(Obsdata, gain_prior): 
+    # gain_list gives all unique (time,site) pairs
+    # gains_t1 gives the gain index for the first site in each measurement
+    # gains_t2 gives the gain index for the second site in each measurement
+    # NOTE: THIS MUST BE FIXED TO MATCH FLAGGING AND SYSTEMATIC NOISE STUFF
+    gain_list = []
+    for j in range(len(Obsdata.data)):
+        if ([Obsdata.data[j]['time'],Obsdata.data[j]['t1']] not in gain_list) and (gain_prior[Obsdata.data[j]['t1']]['prior_type'] != 'fixed'):
+            gain_list.append([Obsdata.data[j]['time'],Obsdata.data[j]['t1']])
+        if ([Obsdata.data[j]['time'],Obsdata.data[j]['t2']] not in gain_list) and (gain_prior[Obsdata.data[j]['t2']]['prior_type'] != 'fixed'):
+            gain_list.append([Obsdata.data[j]['time'],Obsdata.data[j]['t2']])
+
+    # Now determine the appropriate mapping; use the final index for all ignored gains, which default to 1
+    def gain_index(j, tnum):
+        try:
+            return gain_list.index([Obsdata.data[j]['time'],Obsdata.data[j][tnum]])
+        except:
+            return len(gain_list)
+
+    gains_t1 = [gain_index(j, 't1') for j in range(len(Obsdata.data))]
+    gains_t2 = [gain_index(j, 't2') for j in range(len(Obsdata.data))]        
+
+    return (gain_list, gains_t1, gains_t2)
+
+def make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains):
+    bounds = []
+    for j in range(len(param_map)):
+        pm = param_map[j]
+        pb = param_bounds(model_prior[pm[0]][pm[1]])
+        if (model_prior[pm[0]][pm[1]]['prior_type'] not in ['positive','none','fixed']) and (model_prior[pm[0]][pm[1]].get('transform','') != 'cdf'):
+            pb[0] = transform_param(pb[0]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
+            pb[1] = transform_param(pb[1]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
+        bounds.append(pb)
+    for j in range(n_gains):
+        pb = param_bounds(gain_prior[gain_list[j][1]])
+        if (gain_prior[gain_list[j][1]]['prior_type'] not in ['positive','none','fixed']) and (gain_prior[gain_list[j][1]].get('transform','') != 'cdf'):
+            pb[0] = transform_param(pb[0], gain_prior[gain_list[j][1]], inverse=False)
+            pb[1] = transform_param(pb[1], gain_prior[gain_list[j][1]], inverse=False)
+        bounds.append(pb)
+    return np.array(bounds)
+
+# Determine multiplicative factor for the gains (amplitude only)
+def gain_factor(dtype,gains,gains_t1,gains_t2, fit_or_marginalize_gains):
+    global globdict
+
+    if not fit_or_marginalize_gains:
+        if globdict['gain_init'] == None:
+            return 1
+        else:
+            gains = globdict['gain_init']
+
+    if globdict['marginalize_gains']:
+        gains = globdict['gain_init']
+
+    if dtype in ['amp','vis']:    
+        gains_wzero = np.append(gains,0.0)
+        return (1.0 + gains_wzero[gains_t1])*(1.0 + gains_wzero[gains_t2])
+    else:
+        return 1
+
+def gain_factor_separate(dtype,gains,gains_t1,gains_t2, fit_or_marginalize_gains):
+    # Note: these are not displaced by unity!
+    global globdict
+
+    if not fit_or_marginalize_gains:
+        if globdict['gain_init'] == None:
+            return (0., 0.)
+        else:
+            gains = globdict['gain_init']
+
+    if globdict['marginalize_gains']:
+        gains = globdict['gain_init']
+
+    if dtype in ['amp','vis']:    
+        gains_wzero = np.append(gains,0.0)
+        return (gains_wzero[gains_t1], gains_wzero[gains_t2])
+    else:
+        return (0, 0)
+
+def prior_gain(gains, gain_list, gain_prior, fit_gains):
+    if fit_gains:
+        return np.sum([np.log(prior_func(gains[j], gain_prior[gain_list[j][1]])) for j in range(len(gains))])
+    else:
+        return 0.0
+
+def prior_gain_grad(gains, gain_list, gain_prior, fit_gains):
+    if fit_gains:
+        f  = np.array([prior_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
+        df = np.array([prior_grad_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
+        return df/f
+    else:
+        return []
+
+def transform_params(params, param_map, minimizer_func, model_prior, inverse=True):
+    if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+        return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
+    else:
+        # Over-ride all specified parameter transformations to assume CDF
+        # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube), thus the transformation does not need to be inverted
+        return params
+
+def set_params(params, trial_model, param_map, minimizer_func, model_prior):
+    tparams = transform_params(params, param_map, minimizer_func, model_prior)
+
+    for j in range(len(params)):
+        if param_map[j][1] in trial_model.params[param_map[j][0]].keys():
+            trial_model.params[param_map[j][0]][param_map[j][1]] = tparams[j] * param_map[j][2]
+        else: # In this case, the parameter is a list of complex numbers, so the real/imaginary or abs/arg components need to be assigned
+            if param_map[j][1].find('cpol') != -1:
+                param_type = 'beta_list_cpol' 
+                idx = int(param_map[j][1].split('_')[0][8:]) 
+            elif param_map[j][1].find('pol') != -1:
+                param_type = 'beta_list_pol'                
+                idx = int(param_map[j][1].split('_')[0][7:]) + (len(trial_model.params[param_map[j][0]][param_type])-1)//2 
+            elif param_map[j][1].find('beta') != -1:
+                param_type = 'beta_list' 
+                idx = int(param_map[j][1].split('_')[0][4:]) - 1
+            else:
+                raise Exception('Unsure how to interpret ' + param_map[j][1])
+
+            curval = trial_model.params[param_map[j][0]][param_type][idx]
+            if param_map[j][1][-2:] == 're':
+                trial_model.params[param_map[j][0]][param_type][idx] = tparams[j] * param_map[j][2]      + np.imag(curval)*1j
+            elif param_map[j][1][-2:] == 'im':
+                trial_model.params[param_map[j][0]][param_type][idx] = tparams[j] * param_map[j][2] * 1j + np.real(curval)
+            elif param_map[j][1][-3:] == 'abs':
+                trial_model.params[param_map[j][0]][param_type][idx] = tparams[j] * param_map[j][2] * np.exp(1j * np.angle(curval))
+            elif param_map[j][1][-3:] == 'arg': 
+                trial_model.params[param_map[j][0]][param_type][idx] = np.abs(curval) * np.exp(1j * tparams[j] * param_map[j][2])
+            else:
+                print('Parameter ' + param_map[j][1] + ' not understood!')
+
+# Define prior
+def prior(params, param_map, model_prior, minimizer_func):
+    tparams = transform_params(params, param_map, minimizer_func, model_prior)
+    return np.sum([np.log(prior_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]])) for j in range(len(params))])
+
+def prior_grad(params, param_map, model_prior, minimizer_func):
+    tparams = transform_params(params, param_map, minimizer_func, model_prior)        
+    f  = np.array([prior_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(params))])
+    df = np.array([prior_grad_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(params))])
+    return df/f
+
+# Define constraint functions
+def flux_constraint(trial_model, alpha_flux, flux):
+    if alpha_flux == 0.0: 
+        return 0.0
+
+    return ((trial_model.total_flux() - flux)/flux)**2
+
+def flux_constraint_grad(trial_model, alpha_flux, flux, params, param_map):
+    if alpha_flux == 0.0: 
+        return 0.0
+
+    fluxmask = np.zeros_like(params)
+    for j in range(len(param_map)):
+        if param_map[j][1] == 'F0':
+            fluxmask[j] = 1.0
+
+    return 2.0 * (trial_model.total_flux() - flux)/flux * fluxmask
+
+##################################################################################################
+# Define the chi^2 and chi^2 gradient functions
+##################################################################################################
+def laplace_approximation(trial_model, dtype, data, uv, sigma, gains_t1, gains_t2):
+    # Compute the approximate contribution to the log-likelihood by marginalizing over gains
+    global globdict
+
+    if globdict['marginalize_gains'] == True and dtype == 'amp':
+        # Add the log-likelihood term from analytic gain marginalization
+        # Create the Hessian matrix for the argument of the exponential
+        gain_hess = np.zeros((len(globdict['gain_list']), len(globdict['gain_list'])))
+
+        # Add the terms from the likelihood
+        gain = gain_factor(dtype,None,gains_t1,gains_t2,True)
+        amp_model = np.abs(trial_model.sample_uv(uv[:,0],uv[:,1]))
+        amp_bar = gain*data
+        sigma_bar = gain*sigma
+        (g1, g2) = gain_factor_separate(dtype,None,gains_t1,gains_t2,True)
+
+        # Each amplitude *measurement* (not fitted gain parameter!) contributes to the hessian in four places; two diagonal and two off-diagonal
+        for j in range(len(gain)):
+            gain_hess[gains_t1[j],gains_t1[j]] += amp_model[j] * (3.0 * amp_model[j] - 2.0 * amp_bar[j])/((1.0 + g1[j])**2 * sigma_bar[j]**2)
+            gain_hess[gains_t2[j],gains_t2[j]] += amp_model[j] * (3.0 * amp_model[j] - 2.0 * amp_bar[j])/((1.0 + g2[j])**2 * sigma_bar[j]**2)
+            gain_hess[gains_t1[j],gains_t2[j]] += amp_model[j] * (2.0 * amp_model[j] - amp_bar[j])/((1.0 + g1[j])*(1.0 + g2[j]) * sigma_bar[j]**2)
+            gain_hess[gains_t2[j],gains_t1[j]] += amp_model[j] * (2.0 * amp_model[j] - amp_bar[j])/((1.0 + g1[j])*(1.0 + g2[j]) * sigma_bar[j]**2)
+
+        # Add contributions from the prior to the diagonal. This ranges over the fitted gain parameters.
+        # Note: for the Laplace approximation, only Gaussian gain priors have any effect!
+        for j in range(len(globdict['gain_list'])):
+            t = globdict['gain_list'][j][1]
+            if globdict['gain_prior'][t]['prior_type'] == 'gauss':
+                gain_hess[j,j] += 1.0/globdict['gain_prior'][t]['std']
+            elif globdict['gain_prior'][t]['prior_type'] == 'flat':
+                gain_hess[j,j] += 0.0
+            elif globdict['gain_prior'][t]['prior_type'] == 'exponential':
+                gain_hess[j,j] += 0.0
+            elif globdict['gain_prior'][t]['prior_type'] == 'fixed':                
+                gain_hess[j,j] += 0.0
+            else:
+                raise Exception('Gain prior not implemented!')                
+        return np.log((2.0 * np.pi)**(len(gain)/2.0) * np.abs(np.linalg.det(gain_hess))**-0.5)
+    else:
+        return 0.0
+
+def laplace_list():
+    global globdict
+    l1 = laplace_approximation(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], globdict['gains_t1'], globdict['gains_t2'])
+    l2 = laplace_approximation(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], globdict['gains_t1'], globdict['gains_t2'])
+    l3 = laplace_approximation(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], globdict['gains_t1'], globdict['gains_t2'])
+    return (l1, l2, l3)
+
+def chisq_wgain(trial_model, dtype, data, uv, sigma, gains, gains_t1, gains_t2, fit_or_marginalize_gains):
+    global globdict
+    gain = gain_factor(dtype,gains,gains_t1,gains_t2,fit_or_marginalize_gains)
+    log_likelihood = chisq(trial_model, uv, gain*data, gain*sigma, dtype)
+    return log_likelihood
+
+def chisqgrad_wgain(trial_model, dtype, data, uv, sigma, gains, gains_t1, gains_t2, fit_or_marginalize_gains, param_mask, fit_pol=False, fit_cpol=False):
+    gain = gain_factor(dtype,gains,gains_t1,gains_t2,fit_or_marginalize_gains)
+    return chisqgrad(trial_model, uv, gain*data, gain*sigma, dtype, param_mask, fit_or_marginalize_gains, gains, gains_t1, gains_t2, fit_pol, fit_cpol)
+
+def chisq_list(gains):
+    global globdict
+    chi2_1 = chisq_wgain(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
+    chi2_2 = chisq_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
+    chi2_3 = chisq_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
+    return (chi2_1, chi2_2, chi2_3)
+
+##################################################################################################
+# Define the objective function and gradient
+##################################################################################################
+def objfunc(params): 
+    global globdict
+    set_params(params[:globdict['n_params']], globdict['trial_model'], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior'])
+    gains = params[globdict['n_params']:]
+    if globdict['marginalize_gains']:
+        # Ugh, the use of global variables totally messes this up
+        _globdict = globdict
+        globdict['gain_init'] = caltable_to_gains(selfcal(globdict['Obsdata'], globdict['trial_model'], gain_init=globdict['gain_init'], gain_prior=globdict['gain_prior'], msgtype='none'),globdict['gain_list'])
+        globdict = _globdict
+
+    (chi2_1, chi2_2, chi2_3) = chisq_list(gains)
+    datterm  = ( globdict['alpha_d1'] * chi2_1 
+               + globdict['alpha_d2'] * chi2_2
+               + globdict['alpha_d3'] * chi2_3)
+
+    if globdict['marginalize_gains']:
+        (l1, l2, l3) = laplace_list()
+        datterm += l1 + l2 + l3
+
+    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
+        priterm  = prior(params[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func']) 
+        priterm += prior_gain(params[globdict['n_params']:], globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains'])
+    else:
+        priterm  = 0.0
+    fluxterm = globdict['alpha_flux'] * flux_constraint(globdict['trial_model'], globdict['alpha_flux'], globdict['flux'])
+
+    return datterm - priterm + fluxterm - globdict['ln_norm']
+
+def objgrad(params):
+    global globdict
+    set_params(params[:globdict['n_params']], globdict['trial_model'], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior'])
+    gains = params[globdict['n_params']:]
+    datterm  = ( globdict['alpha_d1'] * chisqgrad_wgain(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol']) 
+               + globdict['alpha_d2'] * chisqgrad_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol']) 
+               + globdict['alpha_d3'] * chisqgrad_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol']))
+
+    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
+        priterm  = np.concatenate([prior_grad(params[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func']), prior_gain_grad(params[globdict['n_params']:], globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains'])])
+    else:
+        priterm  = 0.0
+    fluxterm = globdict['alpha_flux'] * flux_constraint_grad(params, globdict['alpha_flux'], globdict['flux'], params, globdict['param_map'])
+
+    grad = datterm - priterm + fluxterm
+
+    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
+        for j in range(globdict['n_params']):
+            grad[j] *= globdict['param_map'][j][2] * transform_grad_param(params[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]])
+    else:
+        # For dynesty, over-ride all specified parameter transformations to assume CDF
+        # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube)
+        # The Jacobian still needs to account for the parameter transformation
+        for j in range(len(params)):
+            if j < globdict['n_params']:
+                grad[j] /= prior_func(params[j],globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]])
+            else:
+                grad[j] /= prior_func(gains[j-globdict['n_params']], globdict['gain_prior'][globdict['gain_list'][j-globdict['n_params']][1]])                    
+
+    if globdict['test_gradient']:
+        import copy
+        dx = 1e-10
+        grad_numeric = np.zeros(len(grad))
+        f1 = objfunc(params)
+        for j in range(len(grad)):
+            params2 = copy.deepcopy(params)
+            params2[j] += dx                
+            f2 = objfunc(params2)
+            grad_numeric[j] = (f2 - f1)/dx
+            if j < globdict['n_params']:
+                print('\nNumeric Gradient Check: ',globdict['param_map'][j][0],globdict['param_map'][j][1],grad[j],grad_numeric[j])
+            else:
+                print('\nNumeric Gradient Check: ',grad[j],grad_numeric[j])
+
+    return grad
+
+##################################################################################################
 # Modeler
 ##################################################################################################
 def modeler_func(Obsdata, model_init, model_prior,
                    d1='vis', d2=False, d3=False,
                    normchisq = False, alpha_d1=0, alpha_d2=0, alpha_d3=0,
+                   fit_pol=False, fit_cpol=False,
                    flux=1.0, alpha_flux=0,
-                   fit_gains=False,gain_init=None,gain_prior=None,
+                   fit_model=True, 
+                   fit_gains=False,marginalize_gains=False,gain_init=None,gain_prior=None,
                    minimizer_func='scipy.optimize.minimize',
                    minimizer_kwargs=None,
                    bounds=None, use_bounds=False,
-                   test_gradient=False, verbose_callback=False, **kwargs):
+                   processes=-1,
+                   test_gradient=False, quiet=False, **kwargs):
 
     """Fit a specified model. 
 
@@ -234,15 +728,24 @@ def modeler_func(Obsdata, model_init, model_prior,
 
        Returns:
            Model: Model object with result
-    """
+    """    
+    global nit, globdict
+    nit = n_params = 0
+    ln_norm = 0.0
 
-    # some kwarg default values
-    maxit = kwargs.get('maxit', MAXIT)
-    stop = kwargs.get('stop', STOP)
+    if fit_model == False and fit_gains == False:
+        raise Exception('Both fit_model and fit_gains are False. Must fit something!')
+
+    if fit_gains == True and marginalize_gains == True:
+        raise Exception('Both fit_gains and marginalize_gains are True. Cannot do both!')
+
+    if fit_gains == False and marginalize_gains == False and gain_init is not None:
+        if not quiet: print('Both fit_gains and marginalize_gains are False but gain_init was passed. Applying these gains as a fixed correction!')
 
     if minimizer_kwargs is None:
         minimizer_kwargs = {}
 
+    # Specifications for verbosity during fits
     show_updates = kwargs.get('show_updates',True)
     update_interval = kwargs.get('update_interval',1)
 
@@ -255,339 +758,143 @@ def modeler_func(Obsdata, model_init, model_prior,
     # Create the trial model
     trial_model = model_init.copy()
 
-    # Define the mapping between solved parameters and the model
-    # Each fitted model parameter is rescaled to give values closer to order unity
-    param_map = []  # Define mapping for every fitted parameter: model component #, parameter name, rescale multiplier, unit
-    param_mask = [] # True or False for whether to fit each model parameter    
-    for j in range(model_init.N_models()):
-        params = model.model_params(model_init.models[j],model_init.params[j])
-        for param in params:
-            if model_prior[j][param]['prior_type'] != 'fixed':
-                param_mask.append(True)
-                try:
-                    if model_prior[j][param].get('transform','') == 'cdf' or minimizer_func in ['dynesty_static','dynesty_dynamic']:
-                        param_map.append([j,param,1,PARAM_DETAILS[param][1],PARAM_DETAILS[param][0]])
-                    else:
-                        param_map.append([j,param,PARAM_DETAILS[param][0],PARAM_DETAILS[param][1],PARAM_DETAILS[param][0]])
-                except:
-                    param_map.append([j,param,1,'',1])
-                    pass
-            else:
-                param_mask.append(False)
+    # Define mapping for every fitted parameter: model component index, parameter name, rescale multiplier, unit
+    (param_map, param_mask) = make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol, fit_cpol)
 
     # Get data and info for the data terms
     (data1, sigma1, uv1) = chisqdata(Obsdata, d1)
     (data2, sigma2, uv2) = chisqdata(Obsdata, d2)
     (data3, sigma3, uv3) = chisqdata(Obsdata, d3)
 
-    # For completeness, determine constant addition to the log-likelihood
-    ln_norm1 = ln_norm2 = ln_norm3 = 0.0
     if normchisq == False:
-        print('Assigning data weights to give the correct log-likelihood...')
-        try: 
-            alpha_d1 = 0.5 * len(data1)
-            ln_norm1 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma1))
-            print('alpha_d1:',alpha_d1)
-        except: pass
-        try: 
-            alpha_d2 = 0.5 * len(data2)
-            ln_norm2 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma2))
-            print('alpha_d2:',alpha_d2)
-        except: pass
-        try: 
-            alpha_d3 = 0.5 * len(data3)        
-            ln_norm3 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma3))
-            print('alpha_d3:',alpha_d3)
-        except: pass
-
-        if d1 in ['vis','bs']:
-            alpha_d1 *= 2
-            ln_norm1 *= 2
-        if d2 in ['vis','bs']:
-            alpha_d2 *= 2
-            ln_norm2 *= 2
-        if d3 in ['vis','bs']:
-            alpha_d3 *= 2
-            ln_norm3 *= 2
-    ln_norm = ln_norm1 + ln_norm2 + ln_norm3
+        if not quiet: print('Assigning data weights to give the correct log-likelihood...')
+        (alpha_d1, alpha_d2, alpha_d3, ln_norm) = likelihood_terms(d1, d2, d3, sigma1, sigma2, sigma3)
+    else:
+        ln_norm = 0.0
 
     # Determine the mapping between solution gains and the input visibilities
-    # NOTE: THIS MUST BE FIXED TO MATCH FLAGGING AND SYSTEMATIC NOISE STUFF
-    if fit_gains:
+    # Use passed gains even if fit_gains=False and marginalize_gains=False
+    # NOTE: THERE IS A PROBLEM IN THIS IMPLEMENTATION. A fixed gain prior is ignored. However, gain_init may still want to apply a constant correction, especially when passing a caltable.
+    # We should maybe have two gain lists: one for constant gains and one for fitted gains
+    mean_g1 = mean_g2 = 0.0
+    if fit_gains or marginalize_gains:
         if gain_prior is None:
-            print('No gain prior specified. Defaulting to an exponential prior with standard deviation of 0.1')
-            gain_prior = {}
-            for site in Obsdata.tarr['site']:
-                gain_prior[site] = {'prior_type':'exponential','std':0.1} 
-
-        # Need all unique (time,site) pairs
-        # Note: This is an extremely slow and clunky way to do this. 
-        gain_list = []
-        for j in range(len(Obsdata.data)):
-            if ([Obsdata.data[j]['time'],Obsdata.data[j]['t1']] not in gain_list) and (gain_prior[Obsdata.data[j]['t1']]['prior_type'] != 'fixed'):
-                gain_list.append([Obsdata.data[j]['time'],Obsdata.data[j]['t1']])
-            if ([Obsdata.data[j]['time'],Obsdata.data[j]['t2']] not in gain_list) and (gain_prior[Obsdata.data[j]['t2']]['prior_type'] != 'fixed'):
-                gain_list.append([Obsdata.data[j]['time'],Obsdata.data[j]['t2']])
-
-        # Now determine the appropriate mapping; use the final index for all ignored gains, which default to 1
-        def gain_index(j, tnum):
-            try:
-                return gain_list.index([Obsdata.data[j]['time'],Obsdata.data[j][tnum]])
-            except:
-                return len(gain_list)
-
-        gains_t1 = [gain_index(j, 't1') for j in range(len(Obsdata.data))]
-        gains_t2 = [gain_index(j, 't2') for j in range(len(Obsdata.data))]        
-        n_gains = len(gain_list)
-        print('Solving for %d gain amplitudes' % n_gains)
-    else:
-        n_gains = 0
-        gain_list = []
-        gains_t1 = None
-        gains_t2 = None
-
-    def prior_gain(gains):
+            gain_prior = default_gain_prior(Obsdata.tarr['site'])
+        (gain_list, gains_t1, gains_t2) = make_gain_map(Obsdata, gain_prior)
+        if type(gain_init) == ehtim.caltable.Caltable:
+            if not quiet: print('Converting gain_init from caltable to a list')
+            gain_init = caltable_to_gains(gain_init, gain_list)
+        if gain_init is None:
+            gain_init = np.zeros(len(gain_list))
+        else:
+            if len(gain_init) != len(gain_list):
+                raise Exception('Gain initialization has incorrect dimensions!')
         if fit_gains:
-            return np.sum([np.log(prior_func(gains[j], gain_prior[gain_list[j][1]])) for j in range(len(gains))])
+            n_gains = len(gain_list)
+        elif marginalize_gains:
+            n_gains = 0
+    else:
+        if gain_init is None:
+            n_gains = 0
+            gain_list = []
+            gains_t1 = gains_t2 = None
         else:
-            return 0.0
-
-    def prior_gain_grad(gains):
-        f  = np.array([prior_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
-        df = np.array([prior_grad_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
-        return df/f
-
-    # Determine multiplicative factor for the gains (amplitude only)
-    def gain_factor(dtype,gains,gains_t1,gains_t2):
-        if not fit_gains:
-            return 1
-
-        if dtype in ['amp','vis']:    
-            gains_wzero = np.append(gains,0.0)
-            return (1.0 + gains_wzero[gains_t1])*(1.0 + gains_wzero[gains_t2])
-        else:
-            return 1
-
-    # Define the chi^2 and chi^2 gradient
-    def chisq1(gains,gains_t1,gains_t2):
-        gain = gain_factor(d1,gains,gains_t1,gains_t2)
-        return chisq(trial_model, uv1, gain*data1, gain*sigma1, d1)
-
-    def chisq1grad(gains,gains_t1,gains_t2):
-        gain = gain_factor(d1,gains,gains_t1,gains_t2)
-        return chisqgrad(trial_model, uv1, gain*data1, gain*sigma1, d1, param_mask, fit_gains, gains, gains_t1, gains_t2)
-
-    def chisq2(gains,gains_t1,gains_t2):
-        gain = gain_factor(d2,gains,gains_t1,gains_t2)
-        return chisq(trial_model, uv2, gain*data2, gain*sigma2, d2)
-
-    def chisq2grad(gains,gains_t1,gains_t2):
-        gain = gain_factor(d2,gains,gains_t1,gains_t2)
-        return chisqgrad(trial_model, uv2, gain*data2, gain*sigma2, d2, param_mask, fit_gains, gains, gains_t1, gains_t2)
-
-    def chisq3(gains,gains_t1,gains_t2):
-        gain = gain_factor(d3,gains,gains_t1,gains_t2)
-        return chisq(trial_model, uv3, gain*data3, gain*sigma3, d3)
-
-    def chisq3grad(gains,gains_t1,gains_t2):
-        gain = gain_factor(d3,gains,gains_t1,gains_t2)
-        return chisqgrad(trial_model, uv3, gain*data3, gain*sigma3, d3, param_mask, fit_gains, gains, gains_t1, gains_t2)
-
-    def transform_params(params, inverse=True):
-        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
-            return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
-        else:
-            # Over-ride all specified parameter transformations to assume CDF
-            # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube), thus the transformation does not need to be inverted
-            return params
-
-    def set_params(params):
-        tparams = transform_params(params)
-
-        for j in range(len(params)):
-            if param_map[j][1] in trial_model.params[param_map[j][0]].keys():
-                trial_model.params[param_map[j][0]][param_map[j][1]] = tparams[j] * param_map[j][2]
-            else: # In this case, the parameter is a list of complex numbers, so the real and imaginary parts need to be assigned
-                param_type = 'beta_list' 
-                idx = int(param_map[j][1][4:-3]) - 1
-                curval = trial_model.params[param_map[j][0]][param_type][idx]
-                if param_map[j][1][-2:] == 're':
-                    trial_model.params[param_map[j][0]][param_type][idx] = tparams[j] * param_map[j][2]      + np.imag(curval)*1j
-                elif param_map[j][1][-2:] == 'im':
-                    trial_model.params[param_map[j][0]][param_type][idx] = tparams[j] * param_map[j][2] * 1j + np.real(curval)
-                else:
-                    print('Parameter ' + param_map[j][1] + ' not understood!')
-
-    # Define prior
-    def prior(params):
-        tparams = transform_params(params)
-        return np.sum([np.log(prior_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]])) for j in range(len(params))])
-
-    def prior_grad(params):
-        tparams = transform_params(params)        
-        f  = np.array([prior_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(params))])
-        df = np.array([prior_grad_func(tparams[j]*param_map[j][2], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(params))])
-        return df/f
-
-    # Define constraint functions
-    def flux_constraint():
-        if alpha_flux == 0.0: 
-            return 0.0
-
-        return ((trial_model.total_flux() - flux)/flux)**2
-
-    def flux_constraint_grad(params):
-        if alpha_flux == 0.0: 
-            return 0.0
-
-        fluxmask = np.zeros_like(params)
-        for j in range(len(param_map)):
-            if param_map[j][1] == 'F0':
-                fluxmask[j] = 1.0
-
-        return 2.0 * (trial_model.total_flux() - flux)/flux * fluxmask
-
-    # Define the objective function and gradient
-    def objfunc(params):
-        if verbose_callback:
-            plotcur(params)
-
-        set_params(params[:n_params])
-        gains = params[n_params:]
-        datterm  = alpha_d1 * chisq1(gains,gains_t1,gains_t2) + alpha_d2 * chisq2(gains,gains_t1,gains_t2) + alpha_d3 * chisq3(gains,gains_t1,gains_t2)
-        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
-            priterm  = prior(params[:n_params]) + prior_gain(params[n_params:])
-        else:
-            priterm  = 0.0
-        fluxterm = alpha_flux * flux_constraint()
-
-        return datterm - priterm + fluxterm - ln_norm
-
-    def objgrad(params):
-        set_params(params[:n_params])
-        gains = params[n_params:]
-        datterm  = alpha_d1 * chisq1grad(gains,gains_t1,gains_t2) + alpha_d2 * chisq2grad(gains,gains_t1,gains_t2) + alpha_d3 * chisq3grad(gains,gains_t1,gains_t2)
-        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
-            priterm  = np.concatenate([prior_grad(params[:n_params]), prior_gain_grad(params[n_params:])])
-        else:
-            priterm  = 0.0
-        fluxterm = alpha_flux * flux_constraint_grad(params)
-
-        grad = datterm - priterm + fluxterm
-
-        if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
-            for j in range(n_params):
-                grad[j] *= param_map[j][2] * transform_grad_param(params[j], model_prior[param_map[j][0]][param_map[j][1]])
-        else:
-            # For dynesty, over-ride all specified parameter transformations to assume CDF
-            # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube)
-            # The Jacobian still needs to account for the parameter transformation
-            for j in range(len(params)):
-                if j < n_params:
-                    grad[j] /= prior_func(params[j],model_prior[param_map[j][0]][param_map[j][1]])
-                else:
-                    grad[j] /= prior_func(gains[j-n_params], gain_prior[gain_list[j-n_params][1]])                    
-    
-        if test_gradient:
-            import copy
-            dx = 1e-10
-            grad_numeric = np.zeros(len(grad))
-            f1 = objfunc(params)
-            for j in range(len(grad)):
-                params2 = copy.deepcopy(params)
-                params2[j] += dx                
-                f2 = objfunc(params2)
-                grad_numeric[j] = (f2 - f1)/dx
-                if j < n_params:
-                    print('\nNumeric Gradient Check: ',param_map[j][0],param_map[j][1],grad[j],grad_numeric[j])
-                else:
-                    print('\nNumeric Gradient Check: ',grad[j],grad_numeric[j])
-
-        return grad
-
-    # Define plotting function for each iteration
-    global nit
-    nit = 0
-    def plotcur(params_step, *args):
-        global nit
-        if show_updates and (nit % update_interval == 0):
-            print('Params:',params_step[:n_params])
-            print('Transformed Params:',transform_params(params_step[:n_params]))
-            gains = params_step[n_params:]
-            chi2_1 = chisq1(gains,gains_t1,gains_t2)
-            chi2_2 = chisq2(gains,gains_t1,gains_t2)
-            chi2_3 = chisq3(gains,gains_t1,gains_t2)
-            #plot_i(im_step, Prior, nit, {d1:chi2_1, d2:chi2_2, d3:chi2_3}, pol=pol)   # could sample model and plot it
-            print("i: %d chi2_1: %0.2f chi2_2: %0.2f chi2_3: %0.2f prior: %0.2f" % (nit, chi2_1, chi2_2, chi2_3, prior(params_step[:n_params])))
-        nit += 1
+            if gain_prior is None:
+                gain_prior = default_gain_prior(Obsdata.tarr['site'])
+            (gain_list, gains_t1, gains_t2) = make_gain_map(Obsdata, gain_prior)
+            if type(gain_init) == ehtim.caltable.Caltable:
+                if not quiet: print('Converting gain_init from caltable to a list')
+                gain_init = caltable_to_gains(gain_init, gain_list)
 
     # Initial parameters
     param_init = []
-
     for j in range(len(param_map)):
         pm = param_map[j]
         if param_map[j][1] in trial_model.params[param_map[j][0]].keys():
             param_init.append(transform_param(model_init.params[pm[0]][pm[1]]/pm[2], model_prior[pm[0]][pm[1]],inverse=False))
-        else: # In this case, the parameter is a list of complex numbers, so the real and imaginary parts need to be assigned
-            param_type = 'beta_list' #param_map[j][1][:-3]
-            idx = int(param_map[j][1][4:-3]) - 1
+        else: # In this case, the parameter is a list of complex numbers, so the real/imaginary or abs/arg components need to be assigned
+            if param_map[j][1].find('cpol') != -1:
+                param_type = 'beta_list_cpol' 
+                idx = int(param_map[j][1].split('_')[0][8:]) 
+            elif param_map[j][1].find('pol') != -1:
+                param_type = 'beta_list_pol'                
+                idx = int(param_map[j][1].split('_')[0][7:]) + (len(trial_model.params[param_map[j][0]][param_type])-1)//2 
+            elif param_map[j][1].find('beta') != -1:
+                param_type = 'beta_list' 
+                idx = int(param_map[j][1].split('_')[0][4:]) - 1
+            else:
+                raise Exception('Unsure how to interpret ' + param_map[j][1])
+
             curval = model_init.params[param_map[j][0]][param_type][idx]
             if param_map[j][1][-2:] == 're':
-                param_init.append(transform_param(np.real(model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
+                param_init.append(transform_param(np.real( model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
             elif param_map[j][1][-2:] == 'im':
-                param_init.append(transform_param(np.imag(model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
+                param_init.append(transform_param(np.imag( model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
+            elif param_map[j][1][-3:] == 'abs':
+                param_init.append(transform_param(np.abs(  model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
+            elif param_map[j][1][-3:] == 'arg':
+                param_init.append(transform_param(np.angle(model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
             else:
-                print('Parameter ' + param_map[j][1] + ' not understood!')  
-        n_params = len(param_init)
+                if not quiet: print('Parameter ' + param_map[j][1] + ' not understood!')  
+    n_params = len(param_init)
+    if fit_gains: # Do not add these if marginalize_gains == True
+        param_init += list(gain_init)
 
-    # Define bounds
-    if bounds is None:
-        bounds = []
-        for j in range(len(param_map)):
-            pm = param_map[j]
-            pb = param_bounds(model_prior[pm[0]][pm[1]])
-            if (model_prior[pm[0]][pm[1]]['prior_type'] not in ['positive','none','fixed']) and (model_prior[pm[0]][pm[1]].get('transform','') != 'cdf'):
-                pb[0] = transform_param(pb[0]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
-                pb[1] = transform_param(pb[1]/pm[2], model_prior[pm[0]][pm[1]], inverse=False)
-            bounds.append(pb)
-        for j in range(n_gains):
-            pb = param_bounds(gain_prior[gain_list[j][1]])
-            if (gain_prior[gain_list[j][1]]['prior_type'] not in ['positive','none','fixed']) and (gain_prior[gain_list[j][1]].get('transform','') != 'cdf'):
-                pb[0] = transform_param(pb[0], gain_prior[gain_list[j][1]], inverse=False)
-                pb[1] = transform_param(pb[1], gain_prior[gain_list[j][1]], inverse=False)
-            bounds.append(pb)
-        bounds = np.array(bounds)
-
-    if use_bounds == False:
-        if minimizer_func in ['scipy.optimize.dual_annealing']:
-            raise Exception('Bounds are required for ' + minimizer_func + '!')
-        else:
+    if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+        # Define bounds (irrelevant for dynesty)
+        if use_bounds == False and minimizer_func in ['scipy.optimize.dual_annealing']:
+            if not quiet: print('Bounds are required for ' + minimizer_func + '! Setting use_bounds=True.')
+            use_bounds = True
+        if use_bounds == False and bounds is not None:
+            if not quiet: print('Bounds passed but use_bounds=False; setting use_bounds=True.')
+            use_bounds = True
+        if bounds is None and use_bounds:
+            if not quiet: print('No bounds passed. Setting nominal bounds.')
+            bounds = make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains)
+        if use_bounds == False:
             bounds = None
 
-    if fit_gains:
-        if gain_init is None:
-            param_init += list(np.zeros(n_gains))
-        else:
-            if len(gain_init) != n_gains:
-                raise Exception('Gain initialization has incorrect dimensions!')
-            param_init += list(gain_init)
+    # Gather global variables into a dictionary 
+    globdict = {'trial_model':trial_model, 
+                'd1':d1, 'd2':d2, 'd3':d3, 
+                'data1':data1, 'sigma1':sigma1, 'uv1':uv1,
+                'data2':data2, 'sigma2':sigma2, 'uv2':uv2,
+                'data3':data3, 'sigma3':sigma3, 'uv3':uv3,
+                'alpha_d1':alpha_d1, 'alpha_d2':alpha_d2, 'alpha_d3':alpha_d3, 
+                'n_params': n_params, 'model_prior':model_prior, 'param_map':param_map, 'param_mask':param_mask, 
+                'gain_prior':gain_prior, 'gain_list':gain_list, 'gain_init':gain_init,
+                'show_updates':show_updates, 'update_interval':update_interval, 'gains_t1':gains_t1, 'gains_t2':gains_t2, 
+                'minimizer_func':minimizer_func,'Obsdata':Obsdata,
+                'fit_pol':fit_pol, 'fit_cpol':fit_cpol,
+                'flux':flux, 'alpha_flux':alpha_flux, 'fit_gains':fit_gains, 'marginalize_gains':marginalize_gains, 'ln_norm':ln_norm, 'param_init':param_init, 'test_gradient':test_gradient}    
 
-    # Print stats
-    print("Initial Chi^2_1: %f Chi^2_2: %f Chi^2_3: %f" % (chisq1(param_init[n_params:],gains_t1,gains_t2), chisq2(param_init[n_params:],gains_t1,gains_t2), chisq3(param_init[n_params:],gains_t1,gains_t2)))
-    print("Initial Objective Function: %f" % (objfunc(param_init)))
+    # Define the function that reports progress
+    def plotcur(params_step, *args):
+        global nit, globdict
+        if globdict['show_updates'] and (nit % globdict['update_interval'] == 0) and (quiet == False):
+            print('Params:',params_step[:globdict['n_params']])
+            print('Transformed Params:',transform_params(params_step[:globdict['n_params']], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior']))
+            gains = params_step[globdict['n_params']:]
+            (chi2_1, chi2_2, chi2_3) = chisq_list(gains)
+            print("i: %d chi2_1: %0.2f chi2_2: %0.2f chi2_3: %0.2f prior: %0.2f" % (nit, chi2_1, chi2_2, chi2_3, prior(params_step[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func'])))
+        nit += 1
 
-    if d1 in DATATERMS:
-        print("Total Data 1: ", (len(data1)))
-    if d2 in DATATERMS:
-        print("Total Data 2: ", (len(data2)))
-    if d3 in DATATERMS:
-        print("Total Data 3: ", (len(data3)))
-
-    print("Total Fitted Real Parameters #: ",(len(param_init)))
+    # Print initial statistics
+    if not quiet: 
+        print("Initial Objective Function: %f" % (objfunc(param_init)))
+        if d1 in DATATERMS:
+            print("Total Data 1: ", (len(data1)))
+        if d2 in DATATERMS:
+            print("Total Data 2: ", (len(data2)))
+        if d3 in DATATERMS:
+            print("Total Data 3: ", (len(data3)))
+        print("Total Fitted Real Parameters #: ",(len(param_init)))
+        print("Fitted Parameters: ",[_[1] for _ in param_map])
     plotcur(param_init)
 
-    # Minimize
+    # Run the minimization
     tstart = time.time()
+    ret = {}
     if minimizer_func == 'scipy.optimize.minimize':
         min_kwargs = {'method':minimizer_kwargs.get('method','L-BFGS-B'),
                       'options':{'maxiter':MAXIT, 'ftol':STOP, 'maxcor':NHIST,'gtol':STOP,'maxls':MAXLS}}
@@ -605,8 +912,8 @@ def modeler_func(Obsdata, model_init, model_prior,
         res = opt.minimize(objfunc, param_init, jac=objgrad, callback=plotcur, bounds=bounds, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.dual_annealing':
         min_kwargs = {}
-        min_kwargs['local_search_options'] = {'jac':objgrad,'method':'L-BFGS-B','options':{'maxiter':MAXIT, 'ftol':STOP, 'maxcor':NHIST,'gtol':STOP,'maxls':MAXLS}}
-
+        min_kwargs['local_search_options'] = {'jac':objgrad, #'args':(globdict,),
+                                              'method':'L-BFGS-B','options':{'maxiter':MAXIT, 'ftol':STOP, 'maxcor':NHIST,'gtol':STOP,'maxls':MAXLS}}
         if 'local_search_options' in minimizer_kwargs.keys():
             for key in minimizer_kwargs['local_search_options'].keys():
                 min_kwargs['local_search_options'][key] = minimizer_kwargs['local_search_options'][key]
@@ -615,7 +922,7 @@ def modeler_func(Obsdata, model_init, model_prior,
             if key in ['local_search_options']:
                 continue
             min_kwargs[key] = minimizer_kwargs[key]
-      
+              
         res = opt.dual_annealing(objfunc, x0=param_init, bounds=bounds, callback=plotcur, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.basinhopping':
         min_kwargs = {}
@@ -627,81 +934,137 @@ def modeler_func(Obsdata, model_init, model_prior,
         import dynesty
         from dynesty import utils as dyfunc
 
+        # Define the functions that dynesty requires
         def prior_transform(u):
-            # This function transforms samples from the unit hypercube (u) to the target prior (x) 
+            # This function transforms samples from the unit hypercube (u) to the target prior (x)
+            global globdict  
             model_params_u = u[:n_params]    
             gain_params_u  = u[n_params:]
-            model_params_x = [cdf_inverse(model_params_u[j], model_prior[param_map[j][0]][param_map[j][1]]) for j in range(len(model_params_u))]
-            gain_params_x  = [cdf_inverse( gain_params_u[j], gain_prior[gain_list[j][1]]) for j in range(len(gain_params_u))]
+            model_params_x = [cdf_inverse(model_params_u[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]]) for j in range(len(model_params_u))]
+            gain_params_x  = [cdf_inverse( gain_params_u[j], globdict['gain_prior'][globdict['gain_list'][j][1]]) for j in range(len(gain_params_u))]
             return np.concatenate([model_params_x, gain_params_x])
 
         def loglike(x):
-            # Note: the log-likelihood is defined in terms of x
             return -objfunc(x)
 
         def grad(x):
-            # Note: the log-likelihood gradient is defined in terms of x
             return -objgrad(x)
 
-        if minimizer_func == 'dynesty_static':
-            sampler = dynesty.NestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, **minimizer_kwargs)
+        # Setup a multiprocessing pool if needed 
+        if processes >= 0:
+            import pathos.multiprocessing as mp
+            from multiprocessing import cpu_count
+            if processes == 0: processes = int(cpu_count())
+
+            # Ensure efficient memory allocation among the processes and separate trial models for each
+            def init(_globdict):
+                global globdict 
+                globdict = _globdict
+                if processes >= 0:
+                    globdict['trial_model'] = globdict['trial_model'].copy()
+
+                return
+
+            pool = mp.Pool(processes=processes, initializer=init, initargs=(globdict,))
+            if not quiet: print('Using a pool with %d processes' % processes)
         else:
-            sampler = dynesty.DynamicNestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, **minimizer_kwargs)
+            pool = processes = use_pool = None
+            
+        # Setup the sampler
+        if minimizer_func == 'dynesty_static':
+            sampler = dynesty.NestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, pool=pool, queue_size=processes, **minimizer_kwargs)
+        else:
+            sampler = dynesty.DynamicNestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, pool=pool, queue_size=processes, **minimizer_kwargs)
+
+        # Run the sampler
         sampler.run_nested()
-        tstop = time.time()        
-        print("time: %f s" % (tstop - tstart))
+
+        # Print the sampler summary
         res = sampler.results
-        try: res.summary()
-        except: pass
+        if not quiet: 
+            try: res.summary()
+            except: pass
 
-        # Extract sampling results.
-        samples = res.samples  # samples
-        weights = np.exp(res.logwt - res.logz[-1])  # normalized weights
+        # Extract useful sampling diagnostics.
+        samples = res.samples                             # samples
+        weights = np.exp(res.logwt - res.logz[-1])        # normalized weights
         mean, cov = dyfunc.mean_and_cov(samples, weights)
-        set_params(mean[:n_params])
+        samples = dyfunc.resample_equal(samples, weights) # resample from the posterior
 
-        print("\nFitted Parameters:")
-        cur_idx = -1
-        for j in range(len(param_map)):
-            if param_map[j][0] != cur_idx:
-                cur_idx = param_map[j][0]
-                print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
-            print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (mean[j] * param_map[j][2]/param_map[j][4],cov[j,j]**0.5 * param_map[j][2]/param_map[j][4]))
-        print('\n')
+        # Return a model determined by the mean of all parameters (this can be a very poor choice!)
+        set_params(mean[:n_params], trial_model, param_map, minimizer_func, model_prior)                
+        gains = mean[n_params:]
 
-        # Return fitted model
-        ret = {'res':res, 'model':trial_model, 'sampler':sampler,'param_map':param_map}
-        return ret
+        # Return the sampler
+        ret['sampler'] = sampler
+        ret['mean'] = mean
+        ret['std']  = cov.diagonal()**0.5
+
+        # Return a set of models from the posterior
+        posterior_models = []
+        for j in range(10):
+            posterior_model = trial_model.copy()
+            set_params(samples[j][:n_params], posterior_model, param_map, minimizer_func, model_prior)  
+            posterior_models.append(posterior_model)   
+        ret['posterior_models'] = posterior_models    
+
+        # Return data that has been rescaled based on default units
+        import copy
+        res_natural = copy.deepcopy(res)
+        res_natural.samples /= np.array([_[4] for _ in param_map])    
+        ret['res_natural'] = res_natural
+
+        # Return the names of the fitted parameters
+        labels = []
+        labels_natural = []
+        for _ in param_map:
+            labels.append(_[1].replace('_','-'))
+            labels_natural.append(_[1].replace('_','-'))
+            if _[3] != '':
+                labels_natural[-1] += ' (' + _[3] + ')'
+        ret['labels'] = labels
+        ret['labels_natural'] = labels_natural
     else:
         raise Exception('Minimizer function ' + minimizer_func + ' is not recognized!')
 
+    # Format and print summary and fitted parameters
     tstop = time.time()
+    trial_model = globdict['trial_model']
 
-    # Format output
-    out = res.x
-    set_params(out[:n_params])
-    gains = out[n_params:]
-    tparams = transform_params(out[:n_params])
+    if not quiet: 
+        print("\ntime: %f s" % (tstop - tstart))
+        print("\nFitted Parameters:")
+    if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+        out = res.x
+        set_params(out[:n_params], trial_model, param_map, minimizer_func, model_prior)
+        gains = out[n_params:]
+        tparams = transform_params(out[:n_params], param_map, minimizer_func, model_prior)
+        if not quiet: 
+            cur_idx = -1
+            for j in range(len(param_map)):
+                if param_map[j][0] != cur_idx:
+                    cur_idx = param_map[j][0]
+                    print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
+                print(('\t' + param_map[j][1] + ': %f ' + param_map[j][3]) % (tparams[j] * param_map[j][2]/param_map[j][4]))
+            print('\n')
 
-    print("\nFitted Parameters:")
-    cur_idx = -1
-    for j in range(len(param_map)):
-        if param_map[j][0] != cur_idx:
-            cur_idx = param_map[j][0]
-            print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
-        print(('\t' + param_map[j][1] + ': %f ' + param_map[j][3]) % (tparams[j] * param_map[j][2]/param_map[j][4]))
-    print('\n')
-
-    # Print stats
-    print("time: %f s" % (tstop - tstart))
-    print("J: %f" % res.fun)
-    print("Final Chi^2_1: %f Chi^2_2: %f  Chi^2_3: %f" % (chisq1(gains,gains_t1,gains_t2), chisq2(gains,gains_t1,gains_t2), chisq3(gains,gains_t1,gains_t2)))
-
-    print(res.message)
+            print("Final Chi^2_1: %f Chi^2_2: %f  Chi^2_3: %f" % chisq_list(gains))
+            print("J: %f" % res.fun)
+            print(res.message)
+    else:
+        if not quiet: 
+            cur_idx = -1
+            for j in range(len(param_map)):
+                if param_map[j][0] != cur_idx:
+                    cur_idx = param_map[j][0]
+                    print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
+                print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (mean[j] * param_map[j][2]/param_map[j][4],cov[j,j]**0.5 * param_map[j][2]/param_map[j][4]))
+            print('\n')
 
     # Return fitted model
-    ret = {'model':trial_model, 'res':res,'param_map':param_map}
-    
+    ret['model']     = trial_model
+    ret['res']       = res
+    ret['param_map'] = param_map    
     if fit_gains:
         ret['gains'] = gains
     
@@ -728,6 +1091,7 @@ def modeler_func(Obsdata, model_init, model_prior,
 
 def chisq(model, uv, data, sigma, dtype):
     """return the chi^2 for the appropriate dtype
+       TODO? Do we need to specify pol?
     """
 
     chisq = 1
@@ -752,10 +1116,14 @@ def chisq(model, uv, data, sigma, dtype):
         chisq = chisq_logcamp(model, uv, data, sigma)
     elif dtype == 'logcamp_diag':
         chisq = chisq_logcamp_diag(model, uv, data, sigma)
+    elif dtype == 'pvis':
+        chisq = chisq_pvis(model, uv, data, sigma)
+    elif dtype == 'm':
+        chisq = chisq_m(model, uv, data, sigma)
 
     return chisq
 
-def chisqgrad(model, uv, data, sigma, dtype, param_mask, fit_gains=False, gains=None, gains_t1=None, gains_t2=None):
+def chisqgrad(model, uv, data, sigma, dtype, param_mask, fit_gains=False, gains=None, gains_t1=None, gains_t2=None, fit_pol=False, fit_cpol=False):
     """return the chi^2 gradient for the appropriate dtype
     """
 
@@ -769,9 +1137,9 @@ def chisqgrad(model, uv, data, sigma, dtype, param_mask, fit_gains=False, gains=
         return np.concatenate([chisqgrad[param_mask],gaingrad])
 
     if dtype == 'vis':
-        chisqgrad = chisqgrad_vis(model, uv, data, sigma)
+        chisqgrad = chisqgrad_vis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'amp':
-        chisqgrad = chisqgrad_amp(model, uv, data, sigma)
+        chisqgrad = chisqgrad_amp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
 
         if fit_gains:
             i1 = model.sample_uv(uv[:,0],uv[:,1])
@@ -780,19 +1148,23 @@ def chisqgrad(model, uv, data, sigma, dtype, param_mask, fit_gains=False, gains=
             pp = ((amp - amp_samples) * amp_samples) / (sigma**2)
             gaingrad = 2.0/(1.0 + np.array(gains)) * np.array([np.sum(pp[(np.array(gains_t1) == j) + (np.array(gains_t2) == j)]) for j in range(len(gains))])/len(data)
     elif dtype == 'logamp':
-        chisqgrad = chisqgrad_logamp(model, uv, data, sigma)
+        chisqgrad = chisqgrad_logamp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'bs':
-        chisqgrad = chisqgrad_bs(model, uv, data, sigma)
+        chisqgrad = chisqgrad_bs(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'cphase':
-        chisqgrad = chisqgrad_cphase(model, uv, data, sigma)
+        chisqgrad = chisqgrad_cphase(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'cphase_diag':
-        chisqgrad = chisqgrad_cphase_diag(model, uv, data, sigma)
+        chisqgrad = chisqgrad_cphase_diag(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'camp':
-        chisqgrad = chisqgrad_camp(model, uv, data, sigma)
+        chisqgrad = chisqgrad_camp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'logcamp':
-        chisqgrad = chisqgrad_logcamp(model, uv, data, sigma)
+        chisqgrad = chisqgrad_logcamp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
     elif dtype == 'logcamp_diag':
-        chisqgrad = chisqgrad_logcamp_diag(model, uv, data, sigma)
+        chisqgrad = chisqgrad_logcamp_diag(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+    elif dtype == 'pvis':
+        chisqgrad = chisqgrad_pvis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+    elif dtype == 'm':
+        chisqgrad = chisqgrad_m(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
 
     return np.concatenate([chisqgrad[param_mask],gaingrad])
 
@@ -819,6 +1191,10 @@ def chisqdata(Obsdata, dtype, pol='I', **kwargs):
         (data, sigma, uv) = chisqdata_logcamp(Obsdata, pol=pol,**kwargs)
     elif dtype == 'logcamp_diag':
         (data, sigma, uv) = chisqdata_logcamp_diag(Obsdata, pol=pol,**kwargs)
+    elif dtype == 'pvis':
+        (data, sigma, uv) = chisqdata_pvis(Obsdata, pol=pol,**kwargs)
+    elif dtype == 'm':
+        (data, sigma, uv) = chisqdata_m(Obsdata, pol=pol,**kwargs)
 
     return (data, sigma, uv)
 
@@ -833,12 +1209,12 @@ def chisq_vis(model, uv, vis, sigma):
     samples = model.sample_uv(uv[:,0],uv[:,1])
     return np.sum(np.abs((samples-vis)/sigma)**2)/(2*len(vis))
 
-def chisqgrad_vis(model, uv, vis, sigma):
+def chisqgrad_vis(model, uv, vis, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the visibility chi-squared"""
 
     samples = model.sample_uv(uv[:,0],uv[:,1])
     wdiff   = (vis - samples)/(sigma**2)
-    grad    = model.sample_grad_uv(uv[:,0],uv[:,1])
+    grad    = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
 
     out = -np.real(np.dot(grad.conj(), wdiff))/len(vis)
     return out
@@ -849,14 +1225,14 @@ def chisq_amp(model, uv, amp, sigma):
     amp_samples = np.abs(model.sample_uv(uv[:,0],uv[:,1]))
     return np.sum(np.abs((amp - amp_samples)/sigma)**2)/len(amp)
 
-def chisqgrad_amp(model, uv, amp, sigma):
+def chisqgrad_amp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the amplitude chi-squared"""
 
     i1 = model.sample_uv(uv[:,0],uv[:,1])
     amp_samples = np.abs(i1)
 
     pp = ((amp - amp_samples) * amp_samples) / (sigma**2) / i1
-    grad = model.sample_grad_uv(uv[:,0],uv[:,1])
+    grad = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
     out = (-2.0/len(amp)) * np.real(np.dot(grad, pp))
     return out
 
@@ -867,15 +1243,15 @@ def chisq_bs(model, uv, bis, sigma):
     chisq= np.sum(np.abs(((bis - bisamples)/sigma))**2)/(2.*len(bis))
     return chisq
 
-def chisqgrad_bs(model, uv, bis, sigma):
+def chisqgrad_bs(model, uv, bis, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the bispectrum chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
     V2 = model.sample_uv(uv[1][:,0],uv[1][:,1])
     V3 = model.sample_uv(uv[2][:,0],uv[2][:,1])
-    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1])
-    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1])
-    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1])
+    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
     bisamples = V1 * V2 * V3 
     wdiff = ((bis - bisamples).conj())/(sigma**2)
     pt1 = wdiff * V2 * V3
@@ -897,7 +1273,7 @@ def chisq_cphase(model, uv, clphase, sigma):
     chisq= (2.0/len(clphase)) * np.sum((1.0 - np.cos(clphase-clphase_samples))/(sigma**2))
     return chisq
 
-def chisqgrad_cphase(model, uv, clphase, sigma):
+def chisqgrad_cphase(model, uv, clphase, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the closure phase chi-squared"""
     clphase = clphase * DEGREE
     sigma = sigma * DEGREE
@@ -905,9 +1281,9 @@ def chisqgrad_cphase(model, uv, clphase, sigma):
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
     V2 = model.sample_uv(uv[1][:,0],uv[1][:,1])
     V3 = model.sample_uv(uv[2][:,0],uv[2][:,1])
-    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1])
-    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1])
-    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1])
+    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
 
     clphase_samples = np.angle(V1 * V2 * V3)
 
@@ -939,7 +1315,7 @@ def chisq_cphase_diag(model, uv, clphase_diag, sigma):
     chisq = (2.0/len(clphase_diag)) * np.sum((1.0 - np.cos(clphase_diag-clphase_diag_samples))/(sigma**2))
     return chisq
 
-def chisqgrad_cphase_diag(model, uv, clphase_diag, sigma):
+def chisqgrad_cphase_diag(model, uv, clphase_diag, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the diagonalized closure phase chi-squared"""
     clphase_diag = clphase_diag * DEGREE
     sigma = sigma * DEGREE
@@ -947,16 +1323,16 @@ def chisqgrad_cphase_diag(model, uv, clphase_diag, sigma):
     uv_diag = uv[0]
     tform_mats = uv[1]
 
-    deriv = np.zeros(len(model.sample_grad_uv(0,0)))
+    deriv = np.zeros(len(model.sample_grad_uv(0,0,fit_pol=fit_pol,fit_cpol=fit_cpol)))
     for iA, uv3 in enumerate(uv_diag):
 
         i1 = model.sample_uv(uv3[0][:,0],uv3[0][:,1])    
         i2 = model.sample_uv(uv3[1][:,0],uv3[1][:,1])    
         i3 = model.sample_uv(uv3[2][:,0],uv3[2][:,1])   
 
-        i1_grad = model.sample_grad_uv(uv3[0][:,0],uv3[0][:,1])
-        i2_grad = model.sample_grad_uv(uv3[1][:,0],uv3[1][:,1])
-        i3_grad = model.sample_grad_uv(uv3[2][:,0],uv3[2][:,1])
+        i1_grad = model.sample_grad_uv(uv3[0][:,0],uv3[0][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+        i2_grad = model.sample_grad_uv(uv3[1][:,0],uv3[1][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+        i3_grad = model.sample_grad_uv(uv3[2][:,0],uv3[2][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
  
         clphase_samples = np.angle(i1 * i2 * i3)
         clphase_diag_samples = np.dot(tform_mats[iA],clphase_samples)
@@ -985,17 +1361,17 @@ def chisq_camp(model, uv, clamp, sigma):
     chisq = np.sum(np.abs((clamp - clamp_samples)/sigma)**2)/len(clamp)
     return chisq
 
-def chisqgrad_camp(model, uv, clamp, sigma):
+def chisqgrad_camp(model, uv, clamp, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the closure amplitude chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
     V2 = model.sample_uv(uv[1][:,0],uv[1][:,1])
     V3 = model.sample_uv(uv[2][:,0],uv[2][:,1])
     V4 = model.sample_uv(uv[3][:,0],uv[3][:,1])
-    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1])
-    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1])
-    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1])
-    V4_grad = model.sample_grad_uv(uv[3][:,0],uv[3][:,1])
+    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V4_grad = model.sample_grad_uv(uv[3][:,0],uv[3][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
 
     clamp_samples = np.abs((V1 * V2)/(V3 * V4))
 
@@ -1019,17 +1395,17 @@ def chisq_logcamp(model, uv, log_clamp, sigma):
     chisq = np.sum(np.abs((log_clamp - samples)/sigma)**2) / (len(log_clamp))
     return  chisq
 
-def chisqgrad_logcamp(model, uv, log_clamp, sigma):
+def chisqgrad_logcamp(model, uv, log_clamp, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the Log closure amplitude chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
     V2 = model.sample_uv(uv[1][:,0],uv[1][:,1])
     V3 = model.sample_uv(uv[2][:,0],uv[2][:,1])
     V4 = model.sample_uv(uv[3][:,0],uv[3][:,1])
-    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1])
-    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1])
-    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1])
-    V4_grad = model.sample_grad_uv(uv[3][:,0],uv[3][:,1])
+    V1_grad = model.sample_grad_uv(uv[0][:,0],uv[0][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V2_grad = model.sample_grad_uv(uv[1][:,0],uv[1][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V3_grad = model.sample_grad_uv(uv[2][:,0],uv[2][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    V4_grad = model.sample_grad_uv(uv[3][:,0],uv[3][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
 
     log_clamp_samples = np.log(np.abs(V1)) + np.log(np.abs(V2)) - np.log(np.abs(V3)) - np.log(np.abs(V4))
 
@@ -1066,13 +1442,13 @@ def chisq_logcamp_diag(model, uv, log_clamp_diag, sigma):
     chisq = np.sum(np.abs((log_clamp_diag - log_clamp_diag_samples)/sigma)**2) / (len(log_clamp_diag))
     return  chisq
 
-def chisqgrad_logcamp_diag(model, uv, log_clamp_diag, sigma):
+def chisqgrad_logcamp_diag(model, uv, log_clamp_diag, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the diagonalized log closure amplitude chi-squared"""
 
     uv_diag = uv[0]
     tform_mats = uv[1]
 
-    deriv = np.zeros(len(model.sample_grad_uv(0,0)))
+    deriv = np.zeros(len(model.sample_grad_uv(0,0,fit_pol=fit_pol,fit_cpol=fit_cpol)))
     for iA, uv4 in enumerate(uv_diag):
 
         i1 = model.sample_uv(uv4[0][:,0],uv4[0][:,1])
@@ -1080,10 +1456,10 @@ def chisqgrad_logcamp_diag(model, uv, log_clamp_diag, sigma):
         i3 = model.sample_uv(uv4[2][:,0],uv4[2][:,1])
         i4 = model.sample_uv(uv4[3][:,0],uv4[3][:,1])
 
-        i1_grad = model.sample_grad_uv(uv4[0][:,0],uv4[0][:,1])
-        i2_grad = model.sample_grad_uv(uv4[1][:,0],uv4[1][:,1])
-        i3_grad = model.sample_grad_uv(uv4[2][:,0],uv4[2][:,1])
-        i4_grad = model.sample_grad_uv(uv4[3][:,0],uv4[3][:,1])
+        i1_grad = model.sample_grad_uv(uv4[0][:,0],uv4[0][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+        i2_grad = model.sample_grad_uv(uv4[1][:,0],uv4[1][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+        i3_grad = model.sample_grad_uv(uv4[2][:,0],uv4[2][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+        i4_grad = model.sample_grad_uv(uv4[3][:,0],uv4[3][:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
 
         log_clamp_samples = np.log(np.abs(i1)) + np.log(np.abs(i2)) - np.log(np.abs(i3)) - np.log(np.abs(i4))
         log_clamp_diag_samples = np.dot(tform_mats[iA],log_clamp_samples)
@@ -1111,7 +1487,7 @@ def chisq_logamp(model, uv, amp, sigma):
     amp_samples = np.abs(model.sample_uv(uv[:,0],uv[:,1]))
     return np.sum(np.abs((np.log(amp) - np.log(amp_samples))/logsigma)**2)/len(amp)
 
-def chisqgrad_logamp(model, uv, amp, sigma):
+def chisqgrad_logamp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False):
     """The gradient of the Log amplitude chi-squared"""
 
     # to lowest order the variance on the logarithm of a quantity x is
@@ -1121,11 +1497,53 @@ def chisqgrad_logamp(model, uv, amp, sigma):
     i1 = model.sample_uv(uv[:,0],uv[:,1])
     amp_samples = np.abs(i1)
 
-    V_grad = model.sample_grad_uv(uv[:,0],uv[:,1])
+    V_grad = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
 
     pp = ((np.log(amp) - np.log(amp_samples))) / (logsigma**2) / i1
     out = (-2.0/len(amp)) * np.real(np.dot(pp, V_grad.T))
     return out
+
+
+def chisq_pvis(model, uv, pvis, psigma):
+    """Polarimetric visibility chi-squared
+    """
+
+    psamples = model.sample_uv(uv[:,0],uv[:,1],pol='P')
+    return np.sum(np.abs((psamples-pvis)/psigma)**2)/(2*len(pvis))
+
+def chisqgrad_pvis(model, uv, pvis, psigma, fit_pol=False, fit_cpol=False):
+    """Polarimetric visibility chi-squared gradient
+    """
+    samples = model.sample_uv(uv[:,0],uv[:,1],pol='P')
+    wdiff   = (pvis - samples)/(psigma**2)
+    grad    = model.sample_grad_uv(uv[:,0],uv[:,1],pol='P',fit_pol=fit_pol,fit_cpol=fit_cpol)
+
+    out = -np.real(np.dot(grad.conj(), wdiff))/len(pvis)
+    return out
+
+def chisq_m(model, uv, m, msigma):
+    """Polarimetric ratio chi-squared
+    """
+
+    msamples = model.sample_uv(uv[:,0],uv[:,1],pol='P')/model.sample_uv(uv[:,0],uv[:,1],pol='I')
+
+    return np.sum(np.abs((m - msamples))**2/(msigma**2)) / (2*len(m))   
+
+def chisqgrad_m(model, uv, mvis, msigma, fit_pol=False, fit_cpol=False):
+    """The gradient of the polarimetric ratio chisq
+    """
+
+    samp_P   = model.sample_uv(uv[:,0],uv[:,1],pol='P')
+    samp_I   = model.sample_uv(uv[:,0],uv[:,1],pol='I')
+    grad_P   = model.sample_grad_uv(uv[:,0],uv[:,1],pol='P',fit_pol=fit_pol,fit_cpol=fit_cpol)
+    grad_I   = model.sample_grad_uv(uv[:,0],uv[:,1],pol='I',fit_pol=fit_pol,fit_cpol=fit_cpol)
+
+    msamples = samp_P/samp_I
+    wdiff   = (mvis - msamples)/(msigma**2)
+    # Get the gradient from the quotient rule
+    grad    = ( grad_P * samp_I - grad_I * samp_P)/samp_I**2
+
+    return -np.real(np.dot(grad.conj(), wdiff))/len(mvis)
 
 ##################################################################################################
 # Chi^2 Data functions
@@ -1508,3 +1926,14 @@ def chisqdata_logcamp_diag(Obsdata, pol='I', **kwargs):
     uvmatrices = (np.array(uv_diag),np.array(tform_mats))
 
     return (np.array(clamp_diag), np.array(sigma_diag), uvmatrices)
+
+def chisqdata_pvis(Obsdata, pol='I', **kwargs):
+    data_arr = Obsdata.unpack(['t1','t2','u','v','pvis','psigma'], conj=True)
+    uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))
+    return (data_arr['pvis'], data_arr['psigma'], uv)
+
+def chisqdata_m(Obsdata, pol='I',**kwargs):
+    debias = kwargs.get('debias',True)
+    data_arr = Obsdata.unpack(['t1','t2','u','v','m','msigma'], conj=True, debias=debias)
+    uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))
+    return (data_arr['m'], data_arr['msigma'], uv)
