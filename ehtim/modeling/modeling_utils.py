@@ -319,7 +319,7 @@ def make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol=F
             elif model_prior[j][param]['prior_type'] != 'fixed':
                 param_mask.append(True)
                 param_type = param
-                if len(param_type.split('_')) == 2:
+                if len(param_type.split('_')) == 2 and param_type not in PARAM_DETAILS:
                     param_type = param_type.split('_')[1]
                 try:
                     if model_prior[j][param].get('transform','') == 'cdf' or minimizer_func in ['dynesty_static','dynesty_dynamic']:
@@ -833,7 +833,7 @@ def modeler_func(Obsdata, model_init, model_prior,
             elif param_map[j][1][-3:] == 'abs':
                 param_init.append(transform_param(np.abs(  model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
             elif param_map[j][1][-3:] == 'arg':
-                param_init.append(transform_param(np.angle(model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
+                param_init.append(transform_param(np.angle(model_init.params[pm[0]][param_type][idx])/pm[2], model_prior[pm[0]][pm[1]],inverse=False))
             else:
                 if not quiet: print('Parameter ' + param_map[j][1] + ' not understood!')  
     n_params = len(param_init)
