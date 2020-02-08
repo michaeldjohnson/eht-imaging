@@ -132,7 +132,8 @@ def default_prior(model_type,model_params=None,fit_pol=False,fit_cpol=False):
         complex_priors = [{'prior_type':'flat','min':-0.5,'max':0.5}, {'prior_type':'flat','min':-0.5,'max':0.5}]
     elif COMPLEX_BASIS == 'abs-arg':
         complex_labels = ['_abs','_arg']
-        complex_priors = [{'prior_type':'flat','min':0.0,'max':0.5}, {'prior_type':'flat','min':0.0,'max':2.0*np.pi}]
+        # Note: angle range here must match np.angle(). Need to properly define wrapped distributions
+        complex_priors = [{'prior_type':'flat','min':0.0,'max':0.5}, {'prior_type':'flat','min':-np.pi, 'max':np.pi}] 
     else:
         raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
 

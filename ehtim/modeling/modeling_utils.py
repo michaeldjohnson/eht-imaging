@@ -163,7 +163,7 @@ def prior_func(x, prior_params):
     """   
 
     if prior_params['prior_type'] == 'flat':
-        return (x > prior_params['min']) * (x < prior_params['max']) * 1.0/(prior_params['max'] - prior_params['min']) + PRIOR_MIN
+        return (x >= prior_params['min']) * (x <= prior_params['max']) * 1.0/(prior_params['max'] - prior_params['min']) + PRIOR_MIN
     elif prior_params['prior_type'] == 'gauss':
         return 1./((2.*np.pi)**0.5 * prior_params['std']) * np.exp(-(x - prior_params['mean'])**2/(2.*prior_params['std']**2))
     elif prior_params['prior_type'] == 'exponential':
@@ -308,7 +308,7 @@ def selfcal(Obsdata, model,
 
 def make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol=False, fit_cpol=False):
     # Define the mapping between solved parameters and the model
-    # Each fitted model parameter is rescaled to give values closer to order unity
+    # Each fitted model parameter can be rescaled to give values closer to order unity
     param_map = []  # Define mapping for every fitted parameter: model component #, parameter name, rescale multiplier internal, unit, rescale multiplier external
     param_mask = [] # True or False for whether to fit each model parameter  
     for j in range(model_init.N_models()):
@@ -687,10 +687,9 @@ def objgrad(params):
 ##################################################################################################
 def modeler_func(Obsdata, model_init, model_prior,
                    d1='vis', d2=False, d3=False,
-                   normchisq = False, alpha_d1=0, alpha_d2=0, alpha_d3=0,
-                   fit_pol=False, fit_cpol=False,
+                   normchisq = False, alpha_d1=0, alpha_d2=0, alpha_d3=0,                   
                    flux=1.0, alpha_flux=0,
-                   fit_model=True, 
+                   fit_model=True, fit_pol=False, fit_cpol=False,
                    fit_gains=False,marginalize_gains=False,gain_init=None,gain_prior=None,
                    minimizer_func='scipy.optimize.minimize',
                    minimizer_kwargs=None,
@@ -712,9 +711,6 @@ def modeler_func(Obsdata, model_init, model_prior,
            alpha_d1 (float): The first data term weighting
            alpha_d2 (float): The second data term weighting
            alpha_d2 (float): The third data term weighting
-
-           maxit (int): Maximum number of minimizer iterations
-           stop (float): The convergence criterion
 
            show_updates (bool): If True, displays the progress of the minimizer
 
@@ -826,7 +822,7 @@ def modeler_func(Obsdata, model_init, model_prior,
                 raise Exception('Unsure how to interpret ' + param_map[j][1])
 
             curval = model_init.params[param_map[j][0]][param_type][idx]
-            if param_map[j][1][-2:] == 're':
+            if   param_map[j][1][-2:] == 're':
                 param_init.append(transform_param(np.real( model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
             elif param_map[j][1][-2:] == 'im':
                 param_init.append(transform_param(np.imag( model_init.params[pm[0]][param_type][idx]/pm[2]), model_prior[pm[0]][pm[1]],inverse=False))
