@@ -30,6 +30,7 @@ import scipy.ndimage as nd
 import scipy.ndimage.filters as filt
 import matplotlib.pyplot as plt
 import scipy.special as sps
+import scipy.stats as stats
 
 import ehtim.image as image
 import ehtim.model as model
@@ -704,27 +705,44 @@ def modeler_func(Obsdata, model_init, model_prior,
            model_init (Model): The Model object to fit
            model_prior (dict): Priors for each model parameter
 
-           d1 (str): The first data term; options are 'vis', 'bs', 'amp', 'cphase', 'cphase_diag' 'camp', 'logcamp', 'logcamp_diag'
-           d2 (str): The second data term; options are 'vis', 'bs', 'amp', 'cphase', 'cphase_diag' 'camp', 'logcamp', 'logcamp_diag'
-           d3 (str): The third data term; options are 'vis', 'bs', 'amp', 'cphase', 'cphase_diag' 'camp', 'logcamp', 'logcamp_diag'
+           d1 (str): The first data term; options are 'vis', 'bs', 'amp', 'cphase', 'cphase_diag' 'camp', 'logcamp', 'logcamp_diag', 'm'
+           d2 (str): The second data term; options are 'vis', 'bs', 'amp', 'cphase', 'cphase_diag' 'camp', 'logcamp', 'logcamp_diag', 'm'
+           d3 (str): The third data term; options are 'vis', 'bs', 'amp', 'cphase', 'cphase_diag' 'camp', 'logcamp', 'logcamp_diag', 'm'
 
-           alpha_d1 (float): The first data term weighting
-           alpha_d2 (float): The second data term weighting
-           alpha_d2 (float): The third data term weighting
+           normchisq (bool): If False (default), automatically assign weights alpha_d1-3 to match the true log-likelihood. 
+           alpha_d1 (float): The first data term weighting. 
+           alpha_d2 (float): The second data term weighting. Default value of zero will automatically assign weights to match the true log-likelihood.
+           alpha_d2 (float): The third data term weighting. Default value of zero will automatically assign weights to match the true log-likelihood.
 
-           show_updates (bool): If True, displays the progress of the minimizer
+           flux (float): Total flux of the fitted model
+           alpha_flux (float): Hyperparameter controlling how strongly to constrain that the total flux matches the specified flux.
 
-           debias (bool): if True then apply debiasing to amplitudes/closure amplitudes
-           systematic_noise (float): a fractional systematic noise tolerance to add to thermal sigmas
-           snrcut (float): a  snr cutoff for including data in the chi^2 sum
+           fit_model (bool): Whether or not to fit the model parameters
+           fit_pol (bool): Whether or not to fit linear polarization parameters
+           fit_cpol (bool): Whether or not to fit circular polarization parameters
+           fit_gains (bool): Whether or not to fit time-dependent amplitude gains for each station
+           marginalize_gains (bool): Whether or not to perform analytic gain marginalization (via the Laplace approximation to the posterior)
+    
+           gain_init (list or caltable): Initial gain amplitudes to apply; these can be specified even if gains aren't fitted
+           gain_prior (dict): Dictionary with the gain prior for each site. 
 
-           maxset (bool):  if True, use maximal set instead of minimal for closure quantities
-           systematic_cphase_noise (float): a value in degrees to add to the closure phase sigmas
-           cp_uv_min (float): flag baselines shorter than this before forming closure quantities
+           minimizer_func (str): Minimizer function to use. Current options are:
+                                'scipy.optimize.minimize'
+                                'scipy.optimize.dual_annealing'
+                                'scipy.optimize.basinhopping'
+                                'dynesty_static'
+                                'dynesty_dynamic'
+           minimizer_kwargs (dict): kwargs passed to the minimizer. 
+
+           bounds (list): List of parameter bounds for the fitted parameters (will automatically compute if needed)
+           use_bounds (bool): Whether or not to use bounds when fitting (required for some minimizers)
+
+           processes (int): Number of processes to use for a multiprocessing pool. -1 disables multiprocessing; 0 uses all that are available. Only used for dynesty.
 
        Returns:
-           Model: Model object with result
+           dict: Dictionary with fitted model ('model') and other diagnostics that are minimizer-dependent
     """    
+
     global nit, globdict
     nit = n_params = 0
     ln_norm = 0.0
@@ -744,6 +762,7 @@ def modeler_func(Obsdata, model_init, model_prior,
     # Specifications for verbosity during fits
     show_updates = kwargs.get('show_updates',True)
     update_interval = kwargs.get('update_interval',1)
+    run_nested_kwargs = kwargs.get('run_nested_kwargs',{})
 
     # Make sure data and regularizer options are ok
     if not d1 and not d2:
@@ -973,7 +992,7 @@ def modeler_func(Obsdata, model_init, model_prior,
             sampler = dynesty.DynamicNestedSampler(loglike, prior_transform, ndim=len(param_init), gradient=grad, pool=pool, queue_size=processes, **minimizer_kwargs)
 
         # Run the sampler
-        sampler.run_nested()
+        sampler.run_nested(**run_nested_kwargs)
 
         # Print the sampler summary
         res = sampler.results
