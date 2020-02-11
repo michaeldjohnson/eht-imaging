@@ -258,6 +258,15 @@ def get_const_polfac(model_type, params, pol):
     return 0.0
 
 def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):   
+    if pol == 'Q':
+        return np.real(sample_1model_xy(x, y, model_type, params, psize=psize, pol='P'))
+    elif pol == 'U':
+        return np.imag(sample_1model_xy(x, y, model_type, params, psize=psize, pol='P'))
+    elif pol in ['I','V','P']:
+        pass
+    else:
+        raise Exception('Polarization ' + pol + ' not implemented!')
+
     if model_type == 'point':
         val = params['F0'] * (np.abs( x - params['x0']) < psize/2.0) * (np.abs( y - params['y0']) < psize/2.0)
     elif model_type == 'circ_gauss':
@@ -290,15 +299,9 @@ def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):
             beta_factor = (1.0 + np.sum([2.*np.real(params['beta_list'][m-1] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list'])+1)],axis=0))
         elif pol == 'V' and len(params['beta_list_cpol']) > 0:
             beta_factor = params['beta_list_cpol'][0] + np.sum([2.*np.real(params['beta_list_cpol'][m] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
-        elif pol in ['Q','U','P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * np.exp(1j * m * phi) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
-            if pol == 'Q':
-                beta_factor = np.real(beta_factor)
-            elif pol == 'U':
-                beta_factor = np.imag(beta_factor)
-            elif pol == 'P':
-                pass
         else:
             beta_factor = 0.0
 
@@ -314,15 +317,9 @@ def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):
             beta_factor = (sps.ive(0, z) + np.sum([2.*np.real(sps.ive(m, z) * params['beta_list'][m-1] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list'])+1)],axis=0))
         elif pol == 'V' and len(params['beta_list_cpol']) > 0:
             beta_factor = (sps.ive(0, z) * params['beta_list_cpol'][0] + np.sum([2.*np.real(sps.ive(m, z) * params['beta_list_cpol'][m] * np.exp(1j * m * phi)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
-        elif pol in ['Q','U','P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.ive(m, z) * np.exp(1j * m * phi) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
-            if pol == 'Q':
-                beta_factor = np.real(beta_factor)
-            elif pol == 'U':
-                beta_factor = np.imag(beta_factor)
-            elif pol == 'P':
-                pass
         else:
             # Note: not all polarizations accounted for yet (need RR, RL, LR, LL; do these by calling for linear combinations of I, Q, U, V)!
             beta_factor = 0.0
@@ -340,6 +337,23 @@ def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):
     return val * get_const_polfac(model_type, params, pol)
 
 def sample_1model_uv(u, v, model_type, params, pol='I'):
+    if pol == 'Q':
+        return 0.5 * (sample_1model_uv(u, v, model_type, params, pol='P') + np.conj(sample_1model_uv(-u, -v, model_type, params, pol='P')))
+    elif pol == 'U':
+        return -0.5j * (sample_1model_uv(u, v, model_type, params, pol='P') - np.conj(sample_1model_uv(-u, -v, model_type, params, pol='P')))
+    elif pol in ['I','V','P']:
+        pass
+    elif pol == 'RR':
+        return sample_1model_uv(u, v, model_type, params, pol='I') + sample_1model_uv(u, v, model_type, params, pol='V')
+    elif pol == 'LL':
+        return sample_1model_uv(u, v, model_type, params, pol='I') - sample_1model_uv(u, v, model_type, params, pol='V')
+    elif pol == 'RL':
+        return sample_1model_uv(u, v, model_type, params, pol='Q') + 1j*sample_1model_uv(u, v, model_type, params, pol='U')
+    elif pol == 'LR':
+        return sample_1model_uv(u, v, model_type, params, pol='Q') - 1j*sample_1model_uv(u, v, model_type, params, pol='U')
+    else:
+        raise Exception('Polarization ' + pol + ' not implemented!')
+
     if model_type == 'point':
         val = params['F0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
     elif model_type == 'circ_gauss':
@@ -381,11 +395,10 @@ def sample_1model_uv(u, v, model_type, params, pol='I'):
             beta_factor = (params['beta_list_cpol'][0] * sps.jv(0, z) 
                + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
                + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
-        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
         else:
-            # Note: not all polarizations accounted for yet!
             beta_factor = 0.0
 
         val = params['F0'] * beta_factor * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))
@@ -403,11 +416,10 @@ def sample_1model_uv(u, v, model_type, params, pol='I'):
             beta_factor = (params['beta_list_cpol'][0] * sps.jv(0, z) 
                + np.sum([params['beta_list_cpol'][m]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
                + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
-        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
         else:
-            # Note: not all polarizations accounted for yet!
             beta_factor = 0.0
 
         val = (params['F0'] * beta_factor
@@ -426,6 +438,23 @@ def sample_1model_uv(u, v, model_type, params, pol='I'):
 def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
     # Gradient of the visibility function, (dV/du, dV/dv)
     # This function makes it convenient to, e.g., compute gradients of stretched images and to compute the model centroid
+
+    if pol == 'Q':
+        return 0.5 * (sample_1model_graduv_uv(u, v, model_type, params, pol='P') + np.conj(sample_1model_graduv_uv(-u, -v, model_type, params, pol='P')))
+    elif pol == 'U':
+        return -0.5j * (sample_1model_graduv_uv(u, v, model_type, params, pol='P') - np.conj(sample_1model_graduv_uv(-u, -v, model_type, params, pol='P')))
+    elif pol in ['I','V','P']:
+        pass
+    elif pol == 'RR':
+        return sample_1model_graduv_uv(u, v, model_type, params, pol='I') + sample_1model_graduv_uv(u, v, model_type, params, pol='V')
+    elif pol == 'LL':
+        return sample_1model_graduv_uv(u, v, model_type, params, pol='I') - sample_1model_graduv_uv(u, v, model_type, params, pol='V')
+    elif pol == 'RL':
+        return sample_1model_graduv_uv(u, v, model_type, params, pol='Q') + 1j*sample_1model_graduv_uv(u, v, model_type, params, pol='U')
+    elif pol == 'LR':
+        return sample_1model_graduv_uv(u, v, model_type, params, pol='Q') - 1j*sample_1model_graduv_uv(u, v, model_type, params, pol='U')
+    else:
+        raise Exception('Polarization ' + pol + ' not implemented!')
 
     vis = sample_1model_uv(u, v, model_type, params)
     if model_type == 'point': 
@@ -503,7 +532,7 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
                     + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * (-1j * m * dphidv) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
                     + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
                     + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
-        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor_u = (
                       np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
@@ -512,7 +541,6 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
                       np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
                     + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0))
         else:
-            # Note: not all polarizations accounted for yet!
             beta_factor_u = beta_factor_v = 0.0
 
         val = np.array([ 
@@ -556,7 +584,7 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
                     + np.sum([np.conj(params['beta_list_cpol'][m]) * sps.jv(-m, z) * (-1j * m * dphidv) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
                     + np.sum([params['beta_list_cpol'][m]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0)
                     + np.sum([np.conj(params['beta_list_cpol'][m]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list_cpol']))],axis=0))
-        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor_u = (0.0
                     + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidu) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
@@ -565,7 +593,6 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
                     + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * sps.jv( m, z) * ( 1j * m * dphidv) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
                     + np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * params['d'] * v/uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0))
         else:
-            # Note: not all polarizations accounted for yet!
             beta_factor_u = beta_factor_v = 0.0
 
         val = np.array([ 
@@ -606,6 +633,24 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
 
 def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_cpol=False):
     # Gradient of the model for each model parameter 
+
+    if pol == 'Q':
+        return   0.5 * (sample_1model_grad_uv(u, v, model_type, params, pol='P', fit_pol=fit_pol, fit_cpol=fit_cpol) + np.conj(sample_1model_grad_uv(-u, -v, model_type, params, pol='P', fit_pol=fit_pol, fit_cpol=fit_cpol)))
+    elif pol == 'U':
+        return -0.5j * (sample_1model_grad_uv(u, v, model_type, params, pol='P', fit_pol=fit_pol, fit_cpol=fit_cpol) - np.conj(sample_1model_grad_uv(-u, -v, model_type, params, pol='P', fit_pol=fit_pol, fit_cpol=fit_cpol)))
+    elif pol in ['I','V','P']:
+        pass
+    elif pol == 'RR':
+        return sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=fit_pol, fit_cpol=fit_cpol) + sample_1model_grad_uv(u, v, model_type, params, pol='V', fit_pol=fit_pol, fit_cpol=fit_cpol)
+    elif pol == 'LL':
+        return sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=fit_pol, fit_cpol=fit_cpol) - sample_1model_grad_uv(u, v, model_type, params, pol='V', fit_pol=fit_pol, fit_cpol=fit_cpol)
+    elif pol == 'RL':
+        return sample_1model_grad_uv(u, v, model_type, params, pol='Q', fit_pol=fit_pol, fit_cpol=fit_cpol) + 1j*sample_1model_grad_uv(u, v, model_type, params, pol='U', fit_pol=fit_pol, fit_cpol=fit_cpol)
+    elif pol == 'LR':
+        return sample_1model_grad_uv(u, v, model_type, params, pol='Q', fit_pol=fit_pol, fit_cpol=fit_cpol) - 1j*sample_1model_grad_uv(u, v, model_type, params, pol='U', fit_pol=fit_pol, fit_cpol=fit_cpol)
+    else:
+        raise Exception('Polarization ' + pol + ' not implemented!')
+
     if model_type == 'point': # F0, x0, y0
         val = np.array([ np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                  1j * 2.0 * np.pi * u * params['F0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
@@ -674,7 +719,7 @@ def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_
             beta_factor = (-np.pi * uvdist * sps.jv(1, z) 
                + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z)  - sps.jv(  m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
                + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv( -m-1, z) - sps.jv( -m+1, z)) * np.pi * uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-        elif pol in ['P'] and len(params['beta_list_pol']) > 0:
+        elif pol == 'P' and len(params['beta_list_pol']) > 0:
             num_coeff = len(params['beta_list_pol'])
             beta_factor = np.sum([params['beta_list_pol'][m + (num_coeff-1)//2] * 0.5 * (sps.jv( m-1, z)  - sps.jv(  m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(-(num_coeff-1)//2,(num_coeff+1)//2)],axis=0)
         elif pol == 'V' and len(params['beta_list_cpol']) > 0:
@@ -734,46 +779,6 @@ def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_
             [grad.append(np.zeros_like(grad[0])) for _ in range(2*len(params['beta_list_pol']))]
 
         val = np.array(grad)
-
-#    elif model_type == 'thick_mring': # F0, d, alpha, x0, y0, beta1_re, beta1_im, beta2_re, beta2_im, ...
-#        phi = np.angle(v + 1j*u)
-#        # Flip the baseline sign to match eht-imaging conventions
-#        phi += np.pi
-#        uvdist = (u**2 + v**2)**0.5
-#        z = np.pi * params['d'] * uvdist
-#        vis = (params['F0'] * (sps.jv(0, z) 
-#               + np.sum([params['beta_list'][m-1]          * sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
-#               + np.sum([np.conj(params['beta_list'][m-1]) * sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-#        grad = [ 1.0/params['F0'] * vis, 
-#                 (params['F0'] * (-np.pi * uvdist * sps.jv(1, z) 
-#               + np.sum([params['beta_list'][m-1]          * 0.5 * (sps.jv( m-1, z) - sps.jv( m+1, z)) * np.pi * uvdist * np.exp( 1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0)
-#               + np.sum([np.conj(params['beta_list'][m-1]) * 0.5 * (sps.jv(-m-1, z) - sps.jv(-m+1, z)) * np.pi * uvdist * np.exp(-1j * m * (phi - np.pi/2.)) for m in range(1,len(params['beta_list'])+1)],axis=0))
-#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))),
-#                -np.pi**2/(2.*np.log(2)) * uvdist**2 * params['alpha'] * vis, 
-#                 1j * 2.0 * np.pi * u * vis, 
-#                 1j * 2.0 * np.pi * v * vis]
-#        # Add derivatives of the beta terms 
-#        for m in range(1,len(params['beta_list'])+1):
-#            beta_grad_re =      (params['F0'] * (sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) + sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)))
-#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))  
-#            beta_grad_im = 1j * (params['F0'] * (sps.jv( m, z) * np.exp( 1j * m * (phi - np.pi/2.)) - sps.jv(-m, z) * np.exp(-1j * m * (phi - np.pi/2.)))
-#               * np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
-#               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
-#            if COMPLEX_BASIS == 're-im':
-#                grad.append(beta_grad_re)
-#                grad.append(beta_grad_im)
-#            elif COMPLEX_BASIS == 'abs-arg':
-#                beta_abs = np.abs(params['beta_list'][m-1])
-#                beta_arg = np.angle(params['beta_list'][m-1])
-#                grad.append(beta_grad_re * np.cos(beta_arg) + beta_grad_im * np.sin(beta_arg))
-#                grad.append(-beta_abs * np.sin(beta_arg) * beta_grad_re + beta_abs * np.cos(beta_arg) * beta_grad_im)
-#            else:
-#                raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
-#        val = np.array(grad)
     elif model_type[:9] == 'stretched':
         # Start with the model visibility
         vis  = sample_1model_uv(u, v, model_type, params, pol=pol)
