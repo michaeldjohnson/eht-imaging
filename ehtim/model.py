@@ -1,10 +1,6 @@
 # model.py
 # an interferometric model class
 
-# To do:
-# 1. Polarimetric models
-# 2. Fix diagonal closure stuff
-
 from __future__ import division
 from __future__ import print_function
 from builtins import str
@@ -27,8 +23,7 @@ from ehtim.const_def import *
 LINE_THICKNESS = 2 # Thickness of 1D models on the image, in pixels
 FOV_DEFAULT = 100.*RADPERUAS
 NPIX_DEFAULT = 256
-
-COMPLEX_BASIS = 'abs-arg' # 'abs-arg' or 're-im'
+COMPLEX_BASIS = 'abs-arg' # Basis for representing (most) complex quantities: 'abs-arg' or 're-im'
 
 ###########################################################################################################################################
 #Model object
@@ -336,7 +331,38 @@ def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):
         val = 0.0
     return val * get_const_polfac(model_type, params, pol)
 
-def sample_1model_uv(u, v, model_type, params, pol='I'):
+def sample_1model_uv(u, v, model_type, params, pol='I', jonesdict=None):
+    if jonesdict is not None:
+        # Define the various lists
+        fr1 = jonesdict['fr1'] # Field rotation of site 1
+        fr2 = jonesdict['fr2'] # Field rotation of site 2
+        DR1 = jonesdict['DR1'] # Right leakage term of site 1
+        DL1 = jonesdict['DL1'] # Left leakage term of site 1
+        DR2 = np.conj(jonesdict['DR2']) # Right leakage term of site 2
+        DL2 = np.conj(jonesdict['DL2']) # Left leakage term of site 2
+        # Sample the model without leakage
+        RR = sample_1model_uv(u, v, model_type, params, pol='RR')
+        RL = sample_1model_uv(u, v, model_type, params, pol='RL')
+        LR = sample_1model_uv(u, v, model_type, params, pol='LR')
+        LL = sample_1model_uv(u, v, model_type, params, pol='LL')
+        # Apply the Jones matrices
+        RRp = RR + LR * DR1 * np.exp( 2j*fr1) + RL * DR2 * np.exp(-2j*fr2) + LL * DR1 * DR2 * np.exp( 2j*(fr1-fr2))
+        RLp = RL + LL * DR1 * np.exp( 2j*fr1) + RR * DL2 * np.exp( 2j*fr2) + LR * DR1 * DL2 * np.exp( 2j*(fr1+fr2))
+        LRp = LR + RR * DL1 * np.exp(-2j*fr1) + LL * DR2 * np.exp(-2j*fr2) + RL * DL1 * DR2 * np.exp(-2j*(fr1+fr2))
+        LLp = LL + LR * DL2 * np.exp( 2j*fr2) + RL * DL1 * np.exp(-2j*fr1) + RR * DL1 * DL2 * np.exp(-2j*(fr1-fr2))
+        # Return the specified polarization
+        if   pol == 'RR': return RRp
+        elif pol == 'RL': return RLp
+        elif pol == 'LR': return LRp
+        elif pol == 'LL': return LLp
+        elif pol == 'I':  return 0.5 * (RRp + LLp)
+        elif pol == 'Q':  return 0.5 * (LRp + RLp)
+        elif pol == 'U':  return 0.5j* (LRp - RLp)
+        elif pol == 'V':  return 0.5 * (RRp - LLp)
+        elif pol == 'P':  return RLp
+        else:
+            raise Exception('Polarization ' + pol + ' not recognized!')
+
     if pol == 'Q':
         return 0.5 * (sample_1model_uv(u, v, model_type, params, pol='P') + np.conj(sample_1model_uv(-u, -v, model_type, params, pol='P')))
     elif pol == 'U':
@@ -435,9 +461,40 @@ def sample_1model_uv(u, v, model_type, params, pol='I'):
         val = 0.0
     return val * get_const_polfac(model_type, params, pol)
 
-def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
+def sample_1model_graduv_uv(u, v, model_type, params, pol='I', jonesdict=None):
     # Gradient of the visibility function, (dV/du, dV/dv)
     # This function makes it convenient to, e.g., compute gradients of stretched images and to compute the model centroid
+
+    if jonesdict is not None:
+        # Define the various lists
+        fr1 = jonesdict['fr1'] # Field rotation of site 1
+        fr2 = jonesdict['fr2'] # Field rotation of site 2
+        DR1 = jonesdict['DR1'] # Right leakage term of site 1
+        DL1 = jonesdict['DL1'] # Left leakage term of site 1
+        DR2 = np.conj(jonesdict['DR2']) # Right leakage term of site 2
+        DL2 = np.conj(jonesdict['DL2']) # Left leakage term of site 2
+        # Sample the model without leakage
+        RR = sample_1model_graduv_uv(u, v, model_type, params, pol='RR').reshape(2,len(u))
+        RL = sample_1model_graduv_uv(u, v, model_type, params, pol='RL').reshape(2,len(u))
+        LR = sample_1model_graduv_uv(u, v, model_type, params, pol='LR').reshape(2,len(u))
+        LL = sample_1model_graduv_uv(u, v, model_type, params, pol='LL').reshape(2,len(u))
+        # Apply the Jones matrices
+        RRp = (RR + LR * DR1 * np.exp( 2j*fr1) + RL * DR2 * np.exp(-2j*fr2) + LL * DR1 * DR2 * np.exp( 2j*(fr1-fr2)))
+        RLp = (RL + LL * DR1 * np.exp( 2j*fr1) + RR * DL2 * np.exp( 2j*fr2) + LR * DR1 * DL2 * np.exp( 2j*(fr1+fr2)))
+        LRp = (LR + RR * DL1 * np.exp(-2j*fr1) + LL * DR2 * np.exp(-2j*fr2) + RL * DL1 * DR2 * np.exp(-2j*(fr1+fr2)))
+        LLp = (LL + LR * DL2 * np.exp( 2j*fr2) + RL * DL1 * np.exp(-2j*fr1) + RR * DL1 * DL2 * np.exp(-2j*(fr1-fr2)))
+        # Return the specified polarization
+        if   pol == 'RR': return RRp
+        elif pol == 'RL': return RLp
+        elif pol == 'LR': return LRp
+        elif pol == 'LL': return LLp
+        elif pol == 'I':  return 0.5 * (RRp + LLp)
+        elif pol == 'Q':  return 0.5 * (LRp + RLp)
+        elif pol == 'U':  return 0.5j* (LRp - RLp)
+        elif pol == 'V':  return 0.5 * (RRp - LLp)
+        elif pol == 'P':  return RLp
+        else:
+            raise Exception('Polarization ' + pol + ' not recognized!')
 
     if pol == 'Q':
         return 0.5 * (sample_1model_graduv_uv(u, v, model_type, params, pol='P') + np.conj(sample_1model_graduv_uv(-u, -v, model_type, params, pol='P')))
@@ -456,7 +513,7 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
     else:
         raise Exception('Polarization ' + pol + ' not implemented!')
 
-    vis = sample_1model_uv(u, v, model_type, params)
+    vis = sample_1model_uv(u, v, model_type, params, jonesdict=jonesdict)
     if model_type == 'point': 
         val = np.array([ 1j * 2.0 * np.pi * params['x0'] * vis,
                           1j * 2.0 * np.pi * params['y0'] * vis])
@@ -621,7 +678,7 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
                   + grad0[0] * ((params['stretch'] - 1.0) * np.cos(params['stretch_PA']) * np.sin(params['stretch_PA'])))
 
         # Add the gradient term from the shift
-        vis = sample_1model_uv(u_stretch, v_stretch, model_type[10:], params_stretch) 
+        vis = sample_1model_uv(u_stretch, v_stretch, model_type[10:], params_stretch, jonesdict=jonesdict) 
         grad[0] += vis * 1j * 2.0 * np.pi * params['x0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
         grad[1] += vis * 1j * 2.0 * np.pi * params['y0'] * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) 
 
@@ -631,8 +688,130 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I'):
         val = 0.0
     return val * get_const_polfac(model_type, params, pol)
 
-def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_cpol=False):
+def sample_1model_grad_leakage_uv_re(u, v, model_type, params, pol, site, hand, jonesdict):
+    # Convenience function to calculate the gradient with respect to the real part of a specified site/hand leakage
+
+    # Define the various lists
+    fr1 = jonesdict['fr1'] # Field rotation of site 1
+    fr2 = jonesdict['fr2'] # Field rotation of site 2
+    DR1 = jonesdict['DR1'] # Right leakage term of site 1
+    DL1 = jonesdict['DL1'] # Left leakage term of site 1
+    DR2 = np.conj(jonesdict['DR2']) # Right leakage term of site 2
+    DL2 = np.conj(jonesdict['DL2']) # Left leakage term of site 2
+    # Sample the model without leakage
+    RR = sample_1model_uv(u, v, model_type, params, pol='RR')
+    RL = sample_1model_uv(u, v, model_type, params, pol='RL')
+    LR = sample_1model_uv(u, v, model_type, params, pol='LR')
+    LL = sample_1model_uv(u, v, model_type, params, pol='LL')
+
+    # Figure out which terms to include in the gradient
+    DR1mask = 0.0 + (hand == 'R') * (jonesdict['t1'] == site)
+    DR2mask = 0.0 + (hand == 'R') * (jonesdict['t2'] == site)
+    DL1mask = 0.0 + (hand == 'L') * (jonesdict['t1'] == site)
+    DL2mask = 0.0 + (hand == 'L') * (jonesdict['t2'] == site)
+
+    # These are the leakage gradient terms
+    RRp = LR * DR1mask * np.exp( 2j*fr1) + RL * DR2mask * np.exp(-2j*fr2) + LL * DR1mask * DR2 * np.exp( 2j*(fr1-fr2)) + LL * DR1 * DR2mask * np.exp( 2j*(fr1-fr2))
+    RLp = LL * DR1mask * np.exp( 2j*fr1) + RR * DL2mask * np.exp( 2j*fr2) + LR * DR1mask * DL2 * np.exp( 2j*(fr1+fr2)) + LR * DR1 * DL2mask * np.exp( 2j*(fr1+fr2))
+    LRp = RR * DL1mask * np.exp(-2j*fr1) + LL * DR2mask * np.exp(-2j*fr2) + RL * DL1mask * DR2 * np.exp(-2j*(fr1+fr2)) + RL * DL1 * DR2mask * np.exp(-2j*(fr1+fr2))
+    LLp = LR * DL2mask * np.exp( 2j*fr2) + RL * DL1mask * np.exp(-2j*fr1) + RR * DL1mask * DL2 * np.exp(-2j*(fr1-fr2)) + RR * DL1 * DL2mask * np.exp(-2j*(fr1-fr2))
+
+    # Return the specified polarization
+    if   pol == 'RR': return RRp
+    elif pol == 'RL': return RLp
+    elif pol == 'LR': return LRp
+    elif pol == 'LL': return LLp
+    elif pol == 'I':  return 0.5 * (RRp + LLp)
+    elif pol == 'Q':  return 0.5 * (LRp + RLp)
+    elif pol == 'U':  return 0.5j* (LRp - RLp)
+    elif pol == 'V':  return 0.5 * (RRp - LLp)
+    elif pol == 'P':  return RLp
+    else:
+        raise Exception('Polarization ' + pol + ' not recognized!')
+
+def sample_1model_grad_leakage_uv_im(u, v, model_type, params, pol, site, hand, jonesdict):
+    # Convenience function to calculate the gradient with respect to the imaginary part of a specified site/hand leakage
+    # The tricky thing here is the conjugation of the second leakage site, flipping the sign of the gradient
+
+    # Define the various lists
+    fr1 = jonesdict['fr1'] # Field rotation of site 1
+    fr2 = jonesdict['fr2'] # Field rotation of site 2
+    DR1 = jonesdict['DR1'] # Right leakage term of site 1
+    DL1 = jonesdict['DL1'] # Left leakage term of site 1
+    DR2 = np.conj(jonesdict['DR2']) # Right leakage term of site 2
+    DL2 = np.conj(jonesdict['DL2']) # Left leakage term of site 2
+    # Sample the model without leakage
+    RR = sample_1model_uv(u, v, model_type, params, pol='RR')
+    RL = sample_1model_uv(u, v, model_type, params, pol='RL')
+    LR = sample_1model_uv(u, v, model_type, params, pol='LR')
+    LL = sample_1model_uv(u, v, model_type, params, pol='LL')
+
+    # Figure out which terms to include in the gradient
+    DR1mask = 0.0 + (hand == 'R') * (jonesdict['t1'] == site)
+    DR2mask = 0.0 + (hand == 'R') * (jonesdict['t2'] == site)
+    DL1mask = 0.0 + (hand == 'L') * (jonesdict['t1'] == site)
+    DL2mask = 0.0 + (hand == 'L') * (jonesdict['t2'] == site)
+
+    # These are the leakage gradient terms
+    RRp = 1j*( LR * DR1mask * np.exp( 2j*fr1) - RL * DR2mask * np.exp(-2j*fr2) + LL * DR1mask * DR2 * np.exp( 2j*(fr1-fr2)) - LL * DR1 * DR2mask * np.exp( 2j*(fr1-fr2)))
+    RLp = 1j*( LL * DR1mask * np.exp( 2j*fr1) - RR * DL2mask * np.exp( 2j*fr2) + LR * DR1mask * DL2 * np.exp( 2j*(fr1+fr2)) - LR * DR1 * DL2mask * np.exp( 2j*(fr1+fr2)))
+    LRp = 1j*( RR * DL1mask * np.exp(-2j*fr1) - LL * DR2mask * np.exp(-2j*fr2) + RL * DL1mask * DR2 * np.exp(-2j*(fr1+fr2)) - RL * DL1 * DR2mask * np.exp(-2j*(fr1+fr2)))
+    LLp = 1j*(-LR * DL2mask * np.exp( 2j*fr2) + RL * DL1mask * np.exp(-2j*fr1) + RR * DL1mask * DL2 * np.exp(-2j*(fr1-fr2)) - RR * DL1 * DL2mask * np.exp(-2j*(fr1-fr2)))
+
+    # Return the specified polarization
+    if   pol == 'RR': return RRp
+    elif pol == 'RL': return RLp
+    elif pol == 'LR': return LRp
+    elif pol == 'LL': return LLp
+    elif pol == 'I':  return 0.5 * (RRp + LLp)
+    elif pol == 'Q':  return 0.5 * (LRp + RLp)
+    elif pol == 'U':  return 0.5j* (LRp - RLp)
+    elif pol == 'V':  return 0.5 * (RRp - LLp)
+    elif pol == 'P':  return RLp
+    else:
+        raise Exception('Polarization ' + pol + ' not recognized!')
+
+def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     # Gradient of the model for each model parameter 
+
+    if jonesdict is not None:
+        # Define the various lists
+        fr1 = jonesdict['fr1'] # Field rotation of site 1
+        fr2 = jonesdict['fr2'] # Field rotation of site 2
+        DR1 = jonesdict['DR1'] # Right leakage term of site 1
+        DL1 = jonesdict['DL1'] # Left leakage term of site 1
+        DR2 = np.conj(jonesdict['DR2']) # Right leakage term of site 2
+        DL2 = np.conj(jonesdict['DL2']) # Left leakage term of site 2
+        # Sample the gradients without leakage
+        RR = sample_1model_grad_uv(u, v, model_type, params, pol='RR', fit_pol=fit_pol, fit_cpol=fit_cpol)
+        RL = sample_1model_grad_uv(u, v, model_type, params, pol='RL', fit_pol=fit_pol, fit_cpol=fit_cpol)
+        LR = sample_1model_grad_uv(u, v, model_type, params, pol='LR', fit_pol=fit_pol, fit_cpol=fit_cpol)
+        LL = sample_1model_grad_uv(u, v, model_type, params, pol='LL', fit_pol=fit_pol, fit_cpol=fit_cpol)
+        # Apply the Jones matrices
+        RRp = (RR + LR * DR1 * np.exp( 2j*fr1) + RL * DR2 * np.exp(-2j*fr2) + LL * DR1 * DR2 * np.exp( 2j*(fr1-fr2)))
+        RLp = (RL + LL * DR1 * np.exp( 2j*fr1) + RR * DL2 * np.exp( 2j*fr2) + LR * DR1 * DL2 * np.exp( 2j*(fr1+fr2)))
+        LRp = (LR + RR * DL1 * np.exp(-2j*fr1) + LL * DR2 * np.exp(-2j*fr2) + RL * DL1 * DR2 * np.exp(-2j*(fr1+fr2)))
+        LLp = (LL + LR * DL2 * np.exp( 2j*fr2) + RL * DL1 * np.exp(-2j*fr1) + RR * DL1 * DL2 * np.exp(-2j*(fr1-fr2)))
+        # Return the specified polarization
+        if   pol == 'RR': grad = RRp
+        elif pol == 'RL': grad = RLp
+        elif pol == 'LR': grad = LRp
+        elif pol == 'LL': grad = LLp
+        elif pol == 'I':  grad = 0.5 * (RRp + LLp)
+        elif pol == 'Q':  grad = 0.5 * (LRp + RLp)
+        elif pol == 'U':  grad = 0.5j* (LRp - RLp)
+        elif pol == 'V':  grad = 0.5 * (RRp - LLp)
+        elif pol == 'P':  grad = RLp
+        else:
+            raise Exception('Polarization ' + pol + ' not recognized!')
+        # If necessary, add the gradient components from the leakage terms
+        # Each leakage term has two corresponding gradient terms: d/dRe and d/dIm. 
+        if fit_leakage:
+            # 'leakage_fit' is a list of tuples [site, 'R' or 'L'] denoting the fitted leakage terms
+            for (site, hand) in jonesdict['leakage_fit']:
+                grad = np.vstack([grad, sample_1model_grad_leakage_uv_re(u, v, model_type, params, pol, site, hand, jonesdict), sample_1model_grad_leakage_uv_im(u, v, model_type, params, pol, site, hand, jonesdict)])
+
+        return grad
 
     if pol == 'Q':
         return   0.5 * (sample_1model_grad_uv(u, v, model_type, params, pol='P', fit_pol=fit_pol, fit_cpol=fit_cpol) + np.conj(sample_1model_grad_uv(-u, -v, model_type, params, pol='P', fit_pol=fit_pol, fit_cpol=fit_cpol)))
@@ -729,7 +908,7 @@ def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_
         else:
             beta_factor = 0.0
             
-        vis  = sample_1model_uv(u, v, model_type, params, pol=pol)
+        vis  = sample_1model_uv(u, v, model_type, params, pol=pol, jonesdict=jonesdict)
         grad = [ 1.0/params['F0'] * vis, 
                  (params['F0'] * alpha_factor * beta_factor * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])))]
         if model_type == 'thick_mring':
@@ -781,7 +960,7 @@ def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_
         val = np.array(grad)
     elif model_type[:9] == 'stretched':
         # Start with the model visibility
-        vis  = sample_1model_uv(u, v, model_type, params, pol=pol)
+        vis  = sample_1model_uv(u, v, model_type, params, pol=pol, jonesdict=jonesdict)
 
         # Next, calculate the gradient wrt model parameters other than stretch and stretch_PA
         # These are the same as the gradient of the unstretched model on stretched baselines
@@ -818,35 +997,43 @@ def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_
         # Add gradient contributions for models that have constant polarization
         if fit_pol:
             # Add gradient wrt pol_frac if the polarization is P, otherwise ignore
-            grad_params = dict(params)
+            grad_params = copy.deepcopy(params)
             grad_params['pol_frac'] = 1.0
-            grad = np.vstack([grad, (pol == 'P') * sample_1model_uv(u, v, model_type, grad_params, pol=pol)])
+            grad = np.vstack([grad, (pol == 'P') * sample_1model_uv(u, v, model_type, grad_params, pol=pol, jonesdict=jonesdict)])
 
             # Add gradient wrt pol_evpa if the polarization is P, otherwise ignore
-            grad_params = dict(params)
+            grad_params = copy.deepcopy(params)
             grad_params['pol_frac'] *= 2j
-            grad = np.vstack([grad, (pol == 'P') * sample_1model_uv(u, v, model_type, grad_params, pol=pol)])
+            grad = np.vstack([grad, (pol == 'P') * sample_1model_uv(u, v, model_type, grad_params, pol=pol, jonesdict=jonesdict)])
         if fit_cpol:
             # Add gradient wrt cpol_frac
-            grad_params = dict(params)
+            grad_params = copy.deepcopy(params)
             grad_params['cpol_frac'] = 1.0
-            grad = np.vstack([grad, (pol == 'V') * sample_1model_uv(u, v, model_type, grad_params, pol=pol)])
+            grad = np.vstack([grad, (pol == 'V') * sample_1model_uv(u, v, model_type, grad_params, pol=pol, jonesdict=jonesdict)])
 
     return grad
 
 def sample_model_xy(models, params, x, y, psize=1.*RADPERUAS, pol='I'):
     return np.sum(sample_1model_xy(x, y, models[j], params[j], psize=psize,pol=pol) for j in range(len(models)))
 
-def sample_model_uv(models, params, u, v, pol='I'):
-    return np.sum(sample_1model_uv(u, v, models[j], params[j], pol=pol) for j in range(len(models)))
+def sample_model_uv(models, params, u, v, pol='I', jonesdict=None):
+    return np.sum(sample_1model_uv(u, v, models[j], params[j], pol=pol, jonesdict=jonesdict) for j in range(len(models)))
 
-def sample_model_graduv_uv(models, params, u, v, pol='I'):
+def sample_model_graduv_uv(models, params, u, v, pol='I', jonesdict=None):
     # Gradient of a sum of models wrt (u,v)
-    return np.sum([sample_1model_graduv_uv(u, v, models[j], params[j], pol=pol) for j in range(len(models))],axis=0)
+    return np.sum([sample_1model_graduv_uv(u, v, models[j], params[j], pol=pol, jonesdict=jonesdict) for j in range(len(models))],axis=0)
 
-def sample_model_grad_uv(models, params, u, v, pol='I', fit_pol=False, fit_cpol=False):
+def sample_model_grad_uv(models, params, u, v, pol='I', fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     # Gradient of a sum of models for each parameter
-    return np.concatenate([sample_1model_grad_uv(u, v, models[j], params[j], pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol) for j in range(len(models))])
+    if fit_leakage == False:
+        return np.concatenate([sample_1model_grad_uv(u, v, models[j], params[j], pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict) for j in range(len(models))])
+    else:
+        # Need to sum the leakage contributions
+        allgrad = [sample_1model_grad_uv(u, v, models[j], params[j], pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict) for j in range(len(models))]
+        n_leakage = len(jonesdict['leakage_fit'])*2
+        grad = np.concatenate([allgrad[j][:-n_leakage] for j in range(len(models))])
+        grad_leakage = np.sum([allgrad[j][-n_leakage:] for j in range(len(models))],axis=0)
+        return np.concatenate([grad, grad_leakage])
 
 def blur_circ_1model(model_type, params, fwhm):
     """Blur a single model, returning new model type and associated parameters
@@ -1276,7 +1463,7 @@ class Model(object):
         """  
         return sample_model_xy(self.models, self.params, x, y, psize=psize, pol=pol)
 
-    def sample_uv(self, u, v, polrep_obs='Stokes', pol='I'):
+    def sample_uv(self, u, v, polrep_obs='Stokes', pol='I', jonesdict=None):
         """Sample model visibility on the specified u and v coordinates
 
            Args:
@@ -1286,9 +1473,9 @@ class Model(object):
            Returns:
                (complex): complex visibility (Jy)
         """   
-        return sample_model_uv(self.models, self.params, u, v, pol=pol)
+        return sample_model_uv(self.models, self.params, u, v, pol=pol, jonesdict=jonesdict)
 
-    def sample_graduv_uv(self, u, v, pol='I'):
+    def sample_graduv_uv(self, u, v, pol='I', jonesdict=None):
         """Sample model visibility gradient on the specified u and v coordinates wrt (u,v)
 
            Args:
@@ -1298,9 +1485,9 @@ class Model(object):
            Returns:
                (complex): complex visibility (Jy)
         """   
-        return sample_model_graduv_uv(self.models, self.params, u, v, pol=pol)
+        return sample_model_graduv_uv(self.models, self.params, u, v, pol=pol, jonesdict=jonesdict)
 
-    def sample_grad_uv(self, u, v, pol='I', fit_pol=False, fit_cpol=False):
+    def sample_grad_uv(self, u, v, pol='I', fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
         """Sample model visibility gradient on the specified u and v coordinates wrt all model parameters
 
            Args:
@@ -1310,7 +1497,7 @@ class Model(object):
            Returns:
                (complex): complex visibility (Jy)
         """   
-        return sample_model_grad_uv(self.models, self.params, u, v, pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        return sample_model_grad_uv(self.models, self.params, u, v, pol=pol, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
 
     def centroid(self, pol=None):
         """Compute the location of the image centroid (corresponding to the polarization pol)
@@ -1403,20 +1590,20 @@ class Model(object):
         # Copy data to be safe
         obsdata = copy.deepcopy(obs.data)
 
-        # Compute visibilities
-        data = self.sample_uv(obs.data['u'], obs.data['v'], polrep_obs=obs.polrep)
+        # Load optional parameters
+        jonesdict = kwargs.get('jonesdict',None)
 
-        # put visibilities into the obsdata
+        # Compute visibilities and put them into the obsdata
         if obs.polrep=='stokes':
-            obsdata['vis']  = self.sample_uv(obs.data['u'], obs.data['v'], pol='I')
-            obsdata['qvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='Q')
-            obsdata['uvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='U')
-            obsdata['vvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='V')
+            obsdata['vis']  = self.sample_uv(obs.data['u'], obs.data['v'], pol='I', jonesdict=jonesdict)
+            obsdata['qvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='Q', jonesdict=jonesdict)
+            obsdata['uvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='U', jonesdict=jonesdict)
+            obsdata['vvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='V', jonesdict=jonesdict)
         elif obs.polrep=='circ':
-            obsdata['rrvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='RR')
-            obsdata['rlvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='RL')
-            obsdata['lrvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='LR')
-            obsdata['llvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='LL')
+            obsdata['rrvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='RR', jonesdict=jonesdict)
+            obsdata['rlvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='RL', jonesdict=jonesdict)
+            obsdata['lrvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='LR', jonesdict=jonesdict)
+            obsdata['llvis'] = self.sample_uv(obs.data['u'], obs.data['v'], pol='LL', jonesdict=jonesdict)
 
         obs_no_noise = ehtim.obsdata.Obsdata(obs.ra, obs.dec, obs.rf, obs.bw, obsdata, obs.tarr,
                                              source=obs.source, mjd=obs.mjd, polrep=obs.polrep,
@@ -1477,7 +1664,7 @@ class Model(object):
         if seed!=False:
             np.random.seed(seed=seed)
 
-        obs = self.observe_same_nonoise(obs_in)
+        obs = self.observe_same_nonoise(obs_in, **kwargs)
 
         # Jones Matrix Corruption & Calibration
         if jones:
@@ -1616,31 +1803,48 @@ class Model(object):
                                      gainp=gainp,gain_offset=gain_offset,
                                      tau=tau, taup=taup,
                                      dterm_offset=dterm_offset,
-                                     jones=jones, inv_jones=inv_jones, seed=seed)
+                                     jones=jones, inv_jones=inv_jones, seed=seed, **kwargs)
 
         obs.mjd = mjd
 
         return obs
 
     def save_txt(self,filename):
-        # Note: need to save extra information (ra, dec, etc.)
+        # Header
+        import ehtim.observing.obs_helpers as obshelp
+        mjd = float(self.mjd)
+        time = self.time
+        mjd += (time/24.)
+
+        head = ("SRC: %s \n" % self.source +
+                "RA: " + obshelp.rastring(self.ra) + "\n" + 
+                "DEC: " + obshelp.decstring(self.dec) + "\n" +
+                "MJD: %.6f \n" % (float(mjd)) +  
+                "RF: %.4f GHz" % (self.rf/1e9))
+        # Models
         out = []
         for j in range(self.N_models()):
             out.append(self.models[j])
             out.append(str(self.params[j]))
-        np.savetxt(filename, out, fmt="%s")
+        np.savetxt(filename, out, header=head, fmt="%s")
 
     def load_txt(self,filename):
-        # Note: need to load extra information (ra, dec, etc.)
         lines = open(filename).read().splitlines()
-        self.models = lines[::2]
-        self.params = [eval(x) for x in lines[1::2]]
+        
+        src = ' '.join(lines[0].split()[2:])
+        ra = lines[1].split()
+        self.ra = float(ra[2]) + float(ra[4])/60.0 + float(ra[6])/3600.0
+        dec = lines[2].split()
+        self.dec = np.sign(float(dec[2])) * (abs(float(dec[2])) + float(dec[4])/60.0 + float(dec[6])/3600.0)
+        mjd_float = float(lines[3].split()[2])
+        self.mjd = int(mjd_float)
+        self.time = (mjd_float - self.mjd) * 24
+        self.rf = float(lines[4].split()[2]) * 1e9
+
+        self.models = lines[5::2]
+        self.params = [eval(x) for x in lines[6::2]]
 
 def load_txt(filename):
-    # Note: need to load extra information (ra, dec, etc.)
     out = Model()
-
-    lines = open(filename).read().splitlines()
-    out.models = lines[::2]
-    out.params = [eval(x) for x in lines[1::2]]
+    out.load_txt(filename)
     return out

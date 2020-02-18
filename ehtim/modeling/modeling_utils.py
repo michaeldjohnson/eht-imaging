@@ -16,6 +16,10 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+## TODO ##
+# >> return jonesdict for all data types <- requires significant modification to eht-imaging
+# >> Deal with nans in fitting (mask chisqdata) <- mostly done
+# >> Add optional transform for leakage and gains
 
 from __future__ import division
 from __future__ import print_function
@@ -31,6 +35,7 @@ import scipy.ndimage.filters as filt
 import matplotlib.pyplot as plt
 import scipy.special as sps
 import scipy.stats as stats
+import copy 
 
 import ehtim.image as image
 import ehtim.model as model
@@ -40,7 +45,6 @@ from ehtim.observing.obs_helpers import *
 from ehtim.statistics.dataframes import *
 
 from IPython import display
-
 
 ##################################################################################################
 # Constants & Definitions
@@ -58,15 +62,20 @@ BOUNDS_EXP_NSIGMA = 10.
 
 PRIOR_MIN = 1e-200 # to avoid problems with log-prior
 
-DATATERMS = ['vis', 'bs', 'amp', 'cphase', 'cphase_diag', 'camp', 'logcamp', 'logcamp_diag', 'logamp', 'pvis', 'm']
+DATATERMS = ['vis', 'bs', 'amp', 'cphase', 'cphase_diag', 'camp', 'logcamp', 'logcamp_diag', 'logamp', 'pvis', 'm', 'rlrr', 'rlll', 'lrrr', 'lrll','rrll','llrr']
 
 nit = 0       # global variable to track the iteration number in the plotting callback
-globdict = {} # global dictionary with all parameters related to the model fitting
+globdict = {} # global dictionary with all parameters related to the model fitting (mainly for efficient parallelization, but also very useful for debugging)
 
 # Details on each fitted parameter (convenience rescaling factor and associated unit)
-PARAM_DETAILS = {'F0':[1.,'Jy'], 'FWHM':[RADPERUAS,'uas'], 'FWHM_maj':[RADPERUAS,'uas'], 'FWHM_min':[RADPERUAS,'uas'], 'd':[RADPERUAS,'uas'], 'PA':[np.pi/180.,'deg'], 'alpha':[RADPERUAS,'uas'], 'x0':[RADPERUAS,'uas'], 'y0':[RADPERUAS,'uas'], 'stretch':[1.,''], 'stretch_PA':[np.pi/180.,'deg'], 'arg':[np.pi/180.,'deg'], 'evpa':[np.pi/180.,'deg']}
+PARAM_DETAILS = {'F0':[1.,'Jy'], 'FWHM':[RADPERUAS,'uas'], 'FWHM_maj':[RADPERUAS,'uas'], 'FWHM_min':[RADPERUAS,'uas'], 
+                 'd':[RADPERUAS,'uas'], 'PA':[np.pi/180.,'deg'], 'alpha':[RADPERUAS,'uas'], 
+                 'x0':[RADPERUAS,'uas'], 'y0':[RADPERUAS,'uas'], 'stretch':[1.,''], 'stretch_PA':[np.pi/180.,'deg'], 
+                 'arg':[np.pi/180.,'deg'], 'evpa':[np.pi/180.,'deg']}
 
 GAIN_PRIOR_DEFAULT = {'prior_type':'exponential','std':0.1} 
+LEAKAGE_PRIOR_DEFAULT = {'prior_type':'flat','min':-0.5,'max':0.5} 
+N_POSTERIOR_SAMPLES = 10
 
 ##################################################################################################
 # Priors
@@ -311,7 +320,7 @@ def make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol=F
     # Define the mapping between solved parameters and the model
     # Each fitted model parameter can be rescaled to give values closer to order unity
     param_map = []  # Define mapping for every fitted parameter: model component #, parameter name, rescale multiplier internal, unit, rescale multiplier external
-    param_mask = [] # True or False for whether to fit each model parameter  
+    param_mask = [] # True or False for whether to fit each model parameter (because the gradient is computed for all model parameters)
     for j in range(model_init.N_models()):
         params = model.model_params(model_init.models[j],model_init.params[j], fit_pol=fit_pol, fit_cpol=fit_cpol)
         for param in params:
@@ -334,8 +343,8 @@ def make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol=F
                 param_mask.append(False)
     return (param_map, param_mask)
 
-def likelihood_terms(d1, d2, d3, sigma1, sigma2, sigma3):
-    # Compute the correct data weights and extra constant for the log-likelihood
+def compute_likelihood_constants(d1, d2, d3, sigma1, sigma2, sigma3):
+    # Compute the correct data weights (hyperparameters) and the correct extra constant for the log-likelihood
     alpha_d1 = alpha_d2 = alpha_d3 = ln_norm1 = ln_norm2 = ln_norm3 = 0.0
 
     try: 
@@ -351,13 +360,13 @@ def likelihood_terms(d1, d2, d3, sigma1, sigma2, sigma3):
         ln_norm3 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma3))
     except: pass
 
-    if d1 in ['vis','bs','m','pvis']:
+    if d1 in ['vis','bs','m','pvis','lrll','rlll','lrrr','rlrr']:
         alpha_d1 *= 2
         ln_norm1 *= 2
-    if d2 in ['vis','bs','m','pvis']:
+    if d2 in ['vis','bs','m','pvis','lrll','rlll','lrrr','rlrr']:
         alpha_d2 *= 2
         ln_norm2 *= 2
-    if d3 in ['vis','bs','m','pvis']:
+    if d3 in ['vis','bs','m','pvis','lrll','rlll','lrrr','rlrr']:
         alpha_d3 *= 2
         ln_norm3 *= 2
     ln_norm = ln_norm1 + ln_norm2 + ln_norm3
@@ -381,7 +390,6 @@ def make_gain_map(Obsdata, gain_prior):
     # gain_list gives all unique (time,site) pairs
     # gains_t1 gives the gain index for the first site in each measurement
     # gains_t2 gives the gain index for the second site in each measurement
-    # NOTE: THIS MUST BE FIXED TO MATCH FLAGGING AND SYSTEMATIC NOISE STUFF
     gain_list = []
     for j in range(len(Obsdata.data)):
         if ([Obsdata.data[j]['time'],Obsdata.data[j]['t1']] not in gain_list) and (gain_prior[Obsdata.data[j]['t1']]['prior_type'] != 'fixed'):
@@ -401,7 +409,7 @@ def make_gain_map(Obsdata, gain_prior):
 
     return (gain_list, gains_t1, gains_t2)
 
-def make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains):
+def make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains, leakage_fit, leakage_prior):
     bounds = []
     for j in range(len(param_map)):
         pm = param_map[j]
@@ -416,6 +424,15 @@ def make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains):
             pb[0] = transform_param(pb[0], gain_prior[gain_list[j][1]], inverse=False)
             pb[1] = transform_param(pb[1], gain_prior[gain_list[j][1]], inverse=False)
         bounds.append(pb)
+    for j in range(len(leakage_fit)):
+        for cpart in ['re','im']:
+            prior = leakage_prior[leakage_fit[j][0]][leakage_fit[j][1]][cpart]
+            pb = param_bounds(prior)
+            if (prior['prior_type'] not in ['positive','none','fixed']) and (prior.get('transform','') != 'cdf'):
+                pb[0] = transform_param(pb[0], prior, inverse=False)
+                pb[1] = transform_param(pb[1], prior, inverse=False)
+            bounds.append(pb)
+
     return np.array(bounds)
 
 # Determine multiplicative factor for the gains (amplitude only)
@@ -438,6 +455,7 @@ def gain_factor(dtype,gains,gains_t1,gains_t2, fit_or_marginalize_gains):
         return 1
 
 def gain_factor_separate(dtype,gains,gains_t1,gains_t2, fit_or_marginalize_gains):
+    # Determine the pair of multiplicative factors for the gains (amplitude only)
     # Note: these are not displaced by unity!
     global globdict
 
@@ -456,13 +474,33 @@ def gain_factor_separate(dtype,gains,gains_t1,gains_t2, fit_or_marginalize_gains
     else:
         return (0, 0)
 
+def prior_leakage(leakage, leakage_fit, leakage_prior, fit_leakage):
+    # Compute the log-prior contribution from the fitted leakage terms
+    if fit_leakage:
+        cparts = ['re','im']
+        return np.sum([np.log(prior_func(leakage[j], leakage_prior[leakage_fit[j//2][0]][leakage_fit[j//2][1]][cparts[j%2]])) for j in range(len(leakage))])
+    else:
+        return 0.0
+
+def prior_leakage_grad(leakage, leakage_fit, leakage_prior, fit_leakage):
+    # Compute the log-prior contribution to the gradient from the leakages
+    if fit_leakage:
+        cparts = ['re','im']
+        f  = np.array([prior_func(leakage[j], leakage_prior[leakage_fit[j//2][0]][leakage_fit[j//2][1]][cparts[j%2]]) for j in range(len(leakage))])
+        df = np.array([prior_grad_func(leakage[j], leakage_prior[leakage_fit[j//2][0]][leakage_fit[j//2][1]][cparts[j%2]]) for j in range(len(leakage))])
+        return df/f
+    else:
+        return []
+
 def prior_gain(gains, gain_list, gain_prior, fit_gains):
+    # Compute the log-prior contribution from the gains
     if fit_gains:
         return np.sum([np.log(prior_func(gains[j], gain_prior[gain_list[j][1]])) for j in range(len(gains))])
     else:
         return 0.0
 
 def prior_gain_grad(gains, gain_list, gain_prior, fit_gains):
+    # Compute the log-prior contribution to the gradient from the gains
     if fit_gains:
         f  = np.array([prior_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
         df = np.array([prior_grad_func(gains[j], gain_prior[gain_list[j][1]]) for j in range(len(gains))])
@@ -474,8 +512,8 @@ def transform_params(params, param_map, minimizer_func, model_prior, inverse=Tru
     if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
         return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
     else:
-        # Over-ride all specified parameter transformations to assume CDF
-        # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube), thus the transformation does not need to be inverted
+        # For dynesty, over-ride all specified parameter transformations to assume CDF
+        # However, the passed parameters to the objective function and gradient are *not* transformed (i.e., they are not in the hypercube), thus the transformation does not need to be inverted
         return params
 
 def set_params(params, trial_model, param_map, minimizer_func, model_prior):
@@ -589,30 +627,66 @@ def laplace_list():
     l3 = laplace_approximation(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], globdict['gains_t1'], globdict['gains_t2'])
     return (l1, l2, l3)
 
-def chisq_wgain(trial_model, dtype, data, uv, sigma, gains, gains_t1, gains_t2, fit_or_marginalize_gains):
+def chisq_wgain(trial_model, dtype, data, uv, sigma, jonesdict, gains, gains_t1, gains_t2, fit_or_marginalize_gains):
     global globdict
     gain = gain_factor(dtype,gains,gains_t1,gains_t2,fit_or_marginalize_gains)
-    log_likelihood = chisq(trial_model, uv, gain*data, gain*sigma, dtype)
+    log_likelihood = chisq(trial_model, uv, gain*data, gain*sigma, dtype, jonesdict)
     return log_likelihood
 
-def chisqgrad_wgain(trial_model, dtype, data, uv, sigma, gains, gains_t1, gains_t2, fit_or_marginalize_gains, param_mask, fit_pol=False, fit_cpol=False):
+def chisqgrad_wgain(trial_model, dtype, data, uv, sigma, jonesdict, gains, gains_t1, gains_t2, fit_or_marginalize_gains, param_mask, fit_pol=False, fit_cpol=False, fit_leakage=False):
     gain = gain_factor(dtype,gains,gains_t1,gains_t2,fit_or_marginalize_gains)
-    return chisqgrad(trial_model, uv, gain*data, gain*sigma, dtype, param_mask, fit_or_marginalize_gains, gains, gains_t1, gains_t2, fit_pol, fit_cpol)
+    return chisqgrad(trial_model, uv, gain*data, gain*sigma, jonesdict, dtype, param_mask, fit_or_marginalize_gains, gains, gains_t1, gains_t2, fit_pol, fit_cpol, fit_leakage)
 
 def chisq_list(gains):
     global globdict
-    chi2_1 = chisq_wgain(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
-    chi2_2 = chisq_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
-    chi2_3 = chisq_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
+    chi2_1 = chisq_wgain(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], globdict['jonesdict1'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
+    chi2_2 = chisq_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], globdict['jonesdict2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
+    chi2_3 = chisq_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], globdict['jonesdict3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'])
     return (chi2_1, chi2_2, chi2_3)
 
+def update_leakage(leakage):
+    # This function updates the 'jonesdict' entries based on current leakage estimates
+    # leakage is list of the fitted parameters (re and im are separate)
+    # station_leakages is the dictionary containing all station leakages, some of which may be fixed
+    global globdict
+    if len(leakage) == 0: return
+
+    station_leakages = globdict['station_leakages']
+    leakage_fit = globdict['leakage_fit']
+    # First, update the entries in the leakage dictionary
+    for j in range(len(leakage)//2):
+        station_leakages[leakage_fit[j][0]][leakage_fit[j][1]] = leakage[2*j] + 1j * leakage[2*j + 1]
+
+    # Now, recompute the jonesdict objects
+    for j in range(1,4):
+        jonesdict = globdict['jonesdict' + str(j)]
+        if jonesdict is not None:
+            if type(jonesdict) is dict:
+                jonesdict['DR1'] = np.array([station_leakages[jonesdict['t1'][_]]['R'] for _ in range(len(jonesdict['t1']))])
+                jonesdict['DR2'] = np.array([station_leakages[jonesdict['t2'][_]]['R'] for _ in range(len(jonesdict['t1']))])
+                jonesdict['DL1'] = np.array([station_leakages[jonesdict['t1'][_]]['L'] for _ in range(len(jonesdict['t1']))])
+                jonesdict['DL2'] = np.array([station_leakages[jonesdict['t2'][_]]['L'] for _ in range(len(jonesdict['t1']))])
+                jonesdict['leakage_fit'] = globdict['leakage_fit']
+            else:
+                # In this case, the data product requires a list of jonesdicts
+                for jonesdict2 in jonesdict:
+                    jonesdict2['DR1'] = np.array([station_leakages[jonesdict2['t1'][_]]['R'] for _ in range(len(jonesdict2['t1']))])
+                    jonesdict2['DR2'] = np.array([station_leakages[jonesdict2['t2'][_]]['R'] for _ in range(len(jonesdict2['t1']))])
+                    jonesdict2['DL1'] = np.array([station_leakages[jonesdict2['t1'][_]]['L'] for _ in range(len(jonesdict2['t1']))])
+                    jonesdict2['DL2'] = np.array([station_leakages[jonesdict2['t2'][_]]['L'] for _ in range(len(jonesdict2['t1']))])
+                    jonesdict2['leakage_fit'] = globdict['leakage_fit']
+        
 ##################################################################################################
 # Define the objective function and gradient
 ##################################################################################################
-def objfunc(params): 
+def objfunc(params, force_posterior=False): 
     global globdict
+    # Note: model parameters can have transformations applied; gains and leakage do not
     set_params(params[:globdict['n_params']], globdict['trial_model'], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior'])
-    gains = params[globdict['n_params']:]
+    gains = params[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])]
+    leakage = params[(globdict['n_params'] + globdict['n_gains']):]
+    update_leakage(leakage)
+
     if globdict['marginalize_gains']:
         # Ugh, the use of global variables totally messes this up
         _globdict = globdict
@@ -628,9 +702,10 @@ def objfunc(params):
         (l1, l2, l3) = laplace_list()
         datterm += l1 + l2 + l3
 
-    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
+    if (globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']) or force_posterior:
         priterm  = prior(params[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func']) 
-        priterm += prior_gain(params[globdict['n_params']:], globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains'])
+        priterm += prior_gain(params[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])], globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains'])
+        priterm += prior_leakage(params[(globdict['n_params'] + globdict['n_gains']):], globdict['leakage_fit'], globdict['leakage_prior'], globdict['fit_leakage'])
     else:
         priterm  = 0.0
     fluxterm = globdict['alpha_flux'] * flux_constraint(globdict['trial_model'], globdict['alpha_flux'], globdict['flux'])
@@ -640,13 +715,21 @@ def objfunc(params):
 def objgrad(params):
     global globdict
     set_params(params[:globdict['n_params']], globdict['trial_model'], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior'])
-    gains = params[globdict['n_params']:]
-    datterm  = ( globdict['alpha_d1'] * chisqgrad_wgain(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol']) 
-               + globdict['alpha_d2'] * chisqgrad_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol']) 
-               + globdict['alpha_d3'] * chisqgrad_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol']))
+    gains = params[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])]
+    leakage = params[(globdict['n_params'] + globdict['n_gains']):]
+    update_leakage(leakage)
+
+    datterm  = ( globdict['alpha_d1'] * chisqgrad_wgain(globdict['trial_model'], globdict['d1'], globdict['data1'], globdict['uv1'], globdict['sigma1'], globdict['jonesdict1'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol'], globdict['fit_leakage']) 
+               + globdict['alpha_d2'] * chisqgrad_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], globdict['jonesdict2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol'], globdict['fit_leakage']) 
+               + globdict['alpha_d3'] * chisqgrad_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], globdict['jonesdict3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol'], globdict['fit_leakage']))
 
     if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
-        priterm  = np.concatenate([prior_grad(params[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func']), prior_gain_grad(params[globdict['n_params']:], globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains'])])
+        priterm  = np.concatenate([prior_grad(params[:globdict['n_params']], globdict['param_map'], 
+                                              globdict['model_prior'], globdict['minimizer_func']), 
+                                  prior_gain_grad(params[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])], 
+                                              globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains']),
+                                  prior_leakage_grad(params[(globdict['n_params'] + globdict['n_gains']):], globdict['leakage_fit'], 
+                                              globdict['leakage_prior'], globdict['fit_leakage'])])
     else:
         priterm  = 0.0
     fluxterm = globdict['alpha_flux'] * flux_constraint_grad(params, globdict['alpha_flux'], globdict['flux'], params, globdict['param_map'])
@@ -662,9 +745,21 @@ def objgrad(params):
         # The Jacobian still needs to account for the parameter transformation
         for j in range(len(params)):
             if j < globdict['n_params']:
-                grad[j] /= prior_func(params[j],globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]])
+                j2 = j
+                x  = params[j2]
+                prior_params = globdict['model_prior'][globdict['param_map'][j2][0]][globdict['param_map'][j2][1]]
+                grad[j] /= prior_func(x,prior_params)
+            elif j < globdict['n_params'] + globdict['n_gains']:
+                j2 = j-globdict['n_params']
+                x = gains[j2]
+                prior_params = globdict['gain_prior'][globdict['gain_list'][j2][1]]
+                grad[j] /= prior_func(x, prior_params)                    
             else:
-                grad[j] /= prior_func(gains[j-globdict['n_params']], globdict['gain_prior'][globdict['gain_list'][j-globdict['n_params']][1]])                    
+                cparts = ['re','im']
+                j2 = j-globdict['n_params']-globdict['n_gains']
+                x = leakage[j2]
+                prior_params = globdict['leakage_prior'][globdict['leakage_fit'][j2//2][0]][globdict['leakage_fit'][j2//2][1]][cparts[j2%2]]
+                grad[j] /= prior_func(x, prior_params)                          
 
     if globdict['test_gradient']:
         import copy
@@ -690,8 +785,9 @@ def modeler_func(Obsdata, model_init, model_prior,
                    d1='vis', d2=False, d3=False,
                    normchisq = False, alpha_d1=0, alpha_d2=0, alpha_d3=0,                   
                    flux=1.0, alpha_flux=0,
-                   fit_model=True, fit_pol=False, fit_cpol=False,
+                   fit_model=True, fit_pol=False, fit_cpol=False, 
                    fit_gains=False,marginalize_gains=False,gain_init=None,gain_prior=None,
+                   fit_leakage=False, leakage_init=None, leakage_prior=None,
                    minimizer_func='scipy.optimize.minimize',
                    minimizer_kwargs=None,
                    bounds=None, use_bounds=False,
@@ -747,8 +843,8 @@ def modeler_func(Obsdata, model_init, model_prior,
     nit = n_params = 0
     ln_norm = 0.0
 
-    if fit_model == False and fit_gains == False:
-        raise Exception('Both fit_model and fit_gains are False. Must fit something!')
+    if fit_model == False and fit_gains == False and fit_leakage == False:
+        raise Exception('Both fit_model, fit_gains, and fit_leakage are False. Must fit something!')
 
     if fit_gains == True and marginalize_gains == True:
         raise Exception('Both fit_gains and marginalize_gains are True. Cannot do both!')
@@ -777,13 +873,77 @@ def modeler_func(Obsdata, model_init, model_prior,
     (param_map, param_mask) = make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol, fit_cpol)
 
     # Get data and info for the data terms
-    (data1, sigma1, uv1) = chisqdata(Obsdata, d1)
-    (data2, sigma2, uv2) = chisqdata(Obsdata, d2)
-    (data3, sigma3, uv3) = chisqdata(Obsdata, d3)
+    (data1, sigma1, uv1, jonesdict1) = chisqdata(Obsdata, d1)
+    (data2, sigma2, uv2, jonesdict2) = chisqdata(Obsdata, d2)
+    (data3, sigma3, uv3, jonesdict3) = chisqdata(Obsdata, d3)
+
+    if fit_leakage or leakage_init is not None:
+        # Determine what leakage terms must be fitted. At most, this would be L & R complex leakages terms for every site
+        # leakage_fit is a list of tuples [site, hand] that will be fitted
+        leakage_fit = []
+        if fit_leakage:
+            import copy # Error on the next line if this isn't done again. Why python, why?!?
+            # Start with the list of all sites
+            sites = list(set(np.concatenate(Obsdata.unpack(['t1','t2']).tolist())))
+
+            # Add missing entries to leakage_prior
+            # leakage_prior is a nested dictionary with keys of station, hand, re/im
+            leakage_prior_init = copy.deepcopy(leakage_prior)
+            if leakage_prior_init is None: leakage_prior_init = {}                
+            leakage_prior = {}
+            for s in sites:
+                leakage_prior[s] = {}
+                for pol in ['R','L']:
+                    leakage_prior[s][pol] = {}
+                    for cpart in ['re','im']:
+                        # check to see if a prior is specified for the complex part, the pol, or the site (in that order)                        
+                        if leakage_prior_init.get(s,{}).get(pol,{}).get(cpart,{}).get('prior_type','') != '':
+                            leakage_prior[s][pol][cpart] = leakage_prior_init[s][pol][cpart]
+                        elif leakage_prior_init.get(s,{}).get(pol,{}).get('prior_type','') != '':
+                            leakage_prior[s][pol][cpart] = copy.deepcopy(leakage_prior_init[s][pol])
+                        elif leakage_prior_init.get(s,{}).get('prior_type','') != '':
+                            leakage_prior[s][pol][cpart] = copy.deepcopy(leakage_prior_init[s])
+                        else:
+                            leakage_prior[s][pol][cpart] = copy.deepcopy(LEAKAGE_PRIOR_DEFAULT)
+            print('leakage prior',leakage_prior)
+
+            if Obsdata.polrep == 'stokes':                
+                for s in sites:
+                    for pol in ['R','L']:
+                        if leakage_prior[s][pol]['re']['prior_type'] == 'fixed': continue                            
+                        leakage_fit.append([s,pol])
+            else:
+                vislist = Obsdata.unpack(['t1','t2','rlvis','lrvis'])
+                # Only fit leakage for sites that include cross hand visibilities
+                DR = list(set(np.concatenate([vislist[~np.isnan(vislist['rlvis'])]['t1'], vislist[~np.isnan(vislist['lrvis'])]['t2']])))
+                DL = list(set(np.concatenate([vislist[~np.isnan(vislist['lrvis'])]['t1'], vislist[~np.isnan(vislist['rlvis'])]['t2']])))
+                [leakage_fit.append([s,'R']) for s in DR if leakage_prior[s]['R']['re']['prior_type'] != 'fixed']
+                [leakage_fit.append([s,'L']) for s in DL if leakage_prior[s]['L']['re']['prior_type'] != 'fixed']
+                sites = list(set(np.concatenate([DR,DL])))
+            
+            if type(leakage_init) is dict:
+                station_leakages = copy.deepcopy(leakage_init)
+            else:
+                station_leakages = {}
+
+            # Add missing entries to station_leakages
+            for s in sites:
+                for pol in ['R','L']:
+                    if s not in station_leakages.keys():
+                        station_leakages[s] = {}
+                    if 'R' not in station_leakages[s].keys():
+                        station_leakages[s]['R'] = 0.0
+                    if 'L' not in station_leakages[s].keys():
+                        station_leakages[s]['L'] = 0.0        
+    else:
+        # Disable leakage computations
+        jonesdict1 = jonesdict2 = jonesdict3 = None
+        leakage_fit = []
+        station_leakages = None
 
     if normchisq == False:
         if not quiet: print('Assigning data weights to give the correct log-likelihood...')
-        (alpha_d1, alpha_d2, alpha_d3, ln_norm) = likelihood_terms(d1, d2, d3, sigma1, sigma2, sigma3)
+        (alpha_d1, alpha_d2, alpha_d3, ln_norm) = compute_likelihood_constants(d1, d2, d3, sigma1, sigma2, sigma3)
     else:
         ln_norm = 0.0
 
@@ -821,6 +981,14 @@ def modeler_func(Obsdata, model_init, model_prior,
                 if not quiet: print('Converting gain_init from caltable to a list')
                 gain_init = caltable_to_gains(gain_init, gain_list)
 
+    if fit_leakage:
+        leakage_init = np.zeros(len(leakage_fit) * 2)  
+        for j in range(len(leakage_init)//2):            
+            leakage_init[2*j] = np.real(station_leakages[leakage_fit[j][0]][leakage_fit[j][1]])
+            leakage_init[2*j + 1] = np.imag(station_leakages[leakage_fit[j][0]][leakage_fit[j][1]])
+    else:
+        leakage_init = []
+
     # Initial parameters
     param_init = []
     for j in range(len(param_map)):
@@ -852,9 +1020,13 @@ def modeler_func(Obsdata, model_init, model_prior,
             else:
                 if not quiet: print('Parameter ' + param_map[j][1] + ' not understood!')  
     n_params = len(param_init)
+
+    # Note: model parameters can have transformations applied; gains and leakage do not
     if fit_gains: # Do not add these if marginalize_gains == True
         param_init += list(gain_init)
-
+    if fit_leakage:
+        param_init += list(leakage_init)
+ 
     if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
         # Define bounds (irrelevant for dynesty)
         if use_bounds == False and minimizer_func in ['scipy.optimize.dual_annealing']:
@@ -865,31 +1037,41 @@ def modeler_func(Obsdata, model_init, model_prior,
             use_bounds = True
         if bounds is None and use_bounds:
             if not quiet: print('No bounds passed. Setting nominal bounds.')
-            bounds = make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains)
+            bounds = make_bounds(model_prior, param_map, gain_prior, gain_list, n_gains, leakage_fit, leakage_prior)
         if use_bounds == False:
             bounds = None
 
     # Gather global variables into a dictionary 
     globdict = {'trial_model':trial_model, 
                 'd1':d1, 'd2':d2, 'd3':d3, 
-                'data1':data1, 'sigma1':sigma1, 'uv1':uv1,
-                'data2':data2, 'sigma2':sigma2, 'uv2':uv2,
-                'data3':data3, 'sigma3':sigma3, 'uv3':uv3,
+                'data1':data1, 'sigma1':sigma1, 'uv1':uv1, 'jonesdict1':jonesdict1,
+                'data2':data2, 'sigma2':sigma2, 'uv2':uv2, 'jonesdict2':jonesdict2,
+                'data3':data3, 'sigma3':sigma3, 'uv3':uv3, 'jonesdict3':jonesdict3,
                 'alpha_d1':alpha_d1, 'alpha_d2':alpha_d2, 'alpha_d3':alpha_d3, 
-                'n_params': n_params, 'model_prior':model_prior, 'param_map':param_map, 'param_mask':param_mask, 
+                'n_params': n_params, 'n_gains':n_gains, 'n_leakage':len(leakage_init),
+                'model_prior':model_prior, 'param_map':param_map, 'param_mask':param_mask, 
                 'gain_prior':gain_prior, 'gain_list':gain_list, 'gain_init':gain_init,
+                'fit_leakage':fit_leakage, 'leakage_init':leakage_init, 'leakage_fit':leakage_fit, 'station_leakages':station_leakages, 'leakage_prior':leakage_prior,
                 'show_updates':show_updates, 'update_interval':update_interval, 'gains_t1':gains_t1, 'gains_t2':gains_t2, 
                 'minimizer_func':minimizer_func,'Obsdata':Obsdata,
                 'fit_pol':fit_pol, 'fit_cpol':fit_cpol,
                 'flux':flux, 'alpha_flux':alpha_flux, 'fit_gains':fit_gains, 'marginalize_gains':marginalize_gains, 'ln_norm':ln_norm, 'param_init':param_init, 'test_gradient':test_gradient}    
+    if fit_leakage:
+        update_leakage(leakage_init)
+
 
     # Define the function that reports progress
     def plotcur(params_step, *args):
         global nit, globdict
         if globdict['show_updates'] and (nit % globdict['update_interval'] == 0) and (quiet == False):
-            print('Params:',params_step[:globdict['n_params']])
-            print('Transformed Params:',transform_params(params_step[:globdict['n_params']], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior']))
-            gains = params_step[globdict['n_params']:]
+            if globdict['n_params'] > 0:
+                print('Params:',params_step[:globdict['n_params']])
+                print('Transformed Params:',transform_params(params_step[:globdict['n_params']], globdict['param_map'], globdict['minimizer_func'], globdict['model_prior']))
+            gains = params_step[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])]
+            leakage = params_step[(globdict['n_params'] + globdict['n_gains']):]
+            if len(leakage):
+                print('leakage:',leakage)
+            update_leakage(leakage)
             (chi2_1, chi2_2, chi2_3) = chisq_list(gains)
             print("i: %d chi2_1: %0.2f chi2_2: %0.2f chi2_3: %0.2f prior: %0.2f" % (nit, chi2_1, chi2_2, chi2_3, prior(params_step[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func'])))
         nit += 1
@@ -904,7 +1086,8 @@ def modeler_func(Obsdata, model_init, model_prior,
         if d3 in DATATERMS:
             print("Total Data 3: ", (len(data3)))
         print("Total Fitted Real Parameters #: ",(len(param_init)))
-        print("Fitted Parameters: ",[_[1] for _ in param_map])
+        print("Fitted Model Parameters: ",[_[1] for _ in param_map])
+        print('Fitting Leakage Terms for:',leakage_fit)
     plotcur(param_init)
 
     # Run the minimization
@@ -927,7 +1110,7 @@ def modeler_func(Obsdata, model_init, model_prior,
         res = opt.minimize(objfunc, param_init, jac=objgrad, callback=plotcur, bounds=bounds, **min_kwargs)
     elif minimizer_func == 'scipy.optimize.dual_annealing':
         min_kwargs = {}
-        min_kwargs['local_search_options'] = {'jac':objgrad, #'args':(globdict,),
+        min_kwargs['local_search_options'] = {'jac':objgrad, 
                                               'method':'L-BFGS-B','options':{'maxiter':MAXIT, 'ftol':STOP, 'maxcor':NHIST,'gtol':STOP,'maxls':MAXLS}}
         if 'local_search_options' in minimizer_kwargs.keys():
             for key in minimizer_kwargs['local_search_options'].keys():
@@ -948,16 +1131,18 @@ def modeler_func(Obsdata, model_init, model_prior,
     elif minimizer_func in ['dynesty_static','dynesty_dynamic']:
         import dynesty
         from dynesty import utils as dyfunc
-
         # Define the functions that dynesty requires
         def prior_transform(u):
             # This function transforms samples from the unit hypercube (u) to the target prior (x)
             global globdict  
-            model_params_u = u[:n_params]    
-            gain_params_u  = u[n_params:]
-            model_params_x = [cdf_inverse(model_params_u[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]]) for j in range(len(model_params_u))]
-            gain_params_x  = [cdf_inverse( gain_params_u[j], globdict['gain_prior'][globdict['gain_list'][j][1]]) for j in range(len(gain_params_u))]
-            return np.concatenate([model_params_x, gain_params_x])
+            cparts = ['re','im']
+            model_params_u   = u[:n_params]    
+            gain_params_u    = u[n_params:(n_params+n_gains)]
+            leakage_params_u = u[(n_params+n_gains):]
+            model_params_x   = [cdf_inverse(  model_params_u[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]]) for j in range(len(model_params_u))]
+            gain_params_x    = [cdf_inverse(   gain_params_u[j], globdict['gain_prior'][globdict['gain_list'][j][1]]) for j in range(len(gain_params_u))]
+            leakage_params_x = [cdf_inverse(leakage_params_u[j], globdict['leakage_prior'][globdict['leakage_fit'][j//2][0]][leakage_fit[j//2][1]][cparts[j%2]]) for j in range(len(leakage_params_u))]
+            return np.concatenate([model_params_x, gain_params_x, leakage_params_x])
 
         def loglike(x):
             return -objfunc(x)
@@ -1004,29 +1189,42 @@ def modeler_func(Obsdata, model_init, model_prior,
         samples = res.samples                             # samples
         weights = np.exp(res.logwt - res.logz[-1])        # normalized weights
         mean, cov = dyfunc.mean_and_cov(samples, weights)
-        samples = dyfunc.resample_equal(samples, weights) # resample from the posterior
 
-        # Return a model determined by the mean of all parameters (this can be a very poor choice!)
-        set_params(mean[:n_params], trial_model, param_map, minimizer_func, model_prior)                
-        gains = mean[n_params:]
+        # Compute the log-posterior
+        logposterior = np.array([-objfunc(x, force_posterior=True) for x in samples])
+
+        # Select the MAP
+        j_MAP = np.argmax(logposterior)
+        MAP  = samples[j_MAP]
+
+        # Resample from the posterior
+        samples = dyfunc.resample_equal(samples, weights) 
+
+        # Return a model determined by the MAP
+        set_params(MAP[:n_params], trial_model, param_map, minimizer_func, model_prior)                
+        gains = MAP[n_params:(n_params+n_gains)]
+        leakage = MAP[(n_params+n_gains):]
+        update_leakage(leakage)
 
         # Return the sampler
         ret['sampler'] = sampler
         ret['mean'] = mean
+        ret['map'] = MAP
         ret['std']  = cov.diagonal()**0.5
+        ret['samples'] = samples
 
         # Return a set of models from the posterior
         posterior_models = []
-        for j in range(10):
+        for j in range(N_POSTERIOR_SAMPLES):
             posterior_model = trial_model.copy()
             set_params(samples[j][:n_params], posterior_model, param_map, minimizer_func, model_prior)  
             posterior_models.append(posterior_model)   
         ret['posterior_models'] = posterior_models    
 
-        # Return data that has been rescaled based on default units
+        # Return data that has been rescaled based on 'natural' units for each parameter
         import copy
         res_natural = copy.deepcopy(res)
-        res_natural.samples /= np.array([_[4] for _ in param_map])    
+        res_natural.samples[:,:n_params] /= np.array([_[4] for _ in param_map])    
         ret['res_natural'] = res_natural
 
         # Return the names of the fitted parameters
@@ -1037,6 +1235,14 @@ def modeler_func(Obsdata, model_init, model_prior,
             labels_natural.append(_[1].replace('_','-'))
             if _[3] != '':
                 labels_natural[-1] += ' (' + _[3] + ')'
+        for _ in gain_list:
+            labels.append(_[0] + ' ' + _[1])
+            labels_natural.append(_[0] + ' ' + _[1])
+        for _ in leakage_fit:
+            for coord in ['re','im']:
+                labels.append(_[0] + ',' + _[1] + ',' + coord)
+                labels_natural.append(_[0] + ',' + _[1] + ',' + coord)
+
         ret['labels'] = labels
         ret['labels_natural'] = labels_natural
     else:
@@ -1052,16 +1258,26 @@ def modeler_func(Obsdata, model_init, model_prior,
     if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
         out = res.x
         set_params(out[:n_params], trial_model, param_map, minimizer_func, model_prior)
-        gains = out[n_params:]
+        gains = out[n_params:(n_params + n_gains)]
+        leakage = out[(n_params + n_gains):]
+        update_leakage(leakage)
         tparams = transform_params(out[:n_params], param_map, minimizer_func, model_prior)
         if not quiet: 
             cur_idx = -1
-            for j in range(len(param_map)):
-                if param_map[j][0] != cur_idx:
-                    cur_idx = param_map[j][0]
-                    print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
-                print(('\t' + param_map[j][1] + ': %f ' + param_map[j][3]) % (tparams[j] * param_map[j][2]/param_map[j][4]))
-            print('\n')
+            if len(param_map):
+                print('Model Parameters:')
+                for j in range(len(param_map)):
+                    if param_map[j][0] != cur_idx:
+                        cur_idx = param_map[j][0]
+                        print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
+                    print(('\t' + param_map[j][1] + ': %f ' + param_map[j][3]) % (tparams[j] * param_map[j][2]/param_map[j][4]))
+                print('\n')
+            
+            if len(leakage_fit):
+                print('Leakage (%; re, im):')
+                for j in range(len(leakage_fit)):
+                    print('\t' + leakage_fit[j][0] + ', ' + leakage_fit[j][1] + ': %2.2f %2.2f' % (leakage[2*j]*100,leakage[2*j + 1]*100))
+                print('\n')
 
             print("Final Chi^2_1: %f Chi^2_2: %f  Chi^2_3: %f" % chisq_list(gains))
             print("J: %f" % res.fun)
@@ -1069,12 +1285,23 @@ def modeler_func(Obsdata, model_init, model_prior,
     else:
         if not quiet: 
             cur_idx = -1
-            for j in range(len(param_map)):
-                if param_map[j][0] != cur_idx:
-                    cur_idx = param_map[j][0]
-                    print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
-                print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (mean[j] * param_map[j][2]/param_map[j][4],cov[j,j]**0.5 * param_map[j][2]/param_map[j][4]))
-            print('\n')
+            if len(param_map):
+                print('Model Parameters (mean and std):')
+                for j in range(len(param_map)):
+                    if param_map[j][0] != cur_idx:
+                        cur_idx = param_map[j][0]
+                        print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
+                    print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (mean[j] * param_map[j][2]/param_map[j][4],cov[j,j]**0.5 * param_map[j][2]/param_map[j][4]))
+                print('\n')
+
+            if len(leakage_fit):
+                print('Leakage (%; re, im):')
+                for j in range(len(leakage_fit)):
+                    j2 = 2*j + n_params + n_gains
+                    print(('\t' + leakage_fit[j][0] + ', ' + leakage_fit[j][1]
+                                + ': %2.2f +/- %2.2f, %2.2f +/- %2.2f') 
+                                % (mean[j2]*100,cov[j2,j2]**0.5 * 100,mean[j2+1]*100,cov[j2+1,j2+1]**0.5 * 100))
+                print('\n')
 
     # Return fitted model
     ret['model']     = trial_model
@@ -1098,15 +1325,23 @@ def modeler_func(Obsdata, model_init, model_prior,
                                            source=Obsdata.source, mjd=Obsdata.mjd, timetype=Obsdata.timetype)
         ret['caltable'] = caltable 
 
+    # If relevant, return useful quantities associated with the leakage
+    if station_leakages is not None:
+        ret['station_leakages'] = station_leakages
+        tarr = Obsdata.tarr.copy()
+        for s in station_leakages.keys():
+            if 'R' in station_leakages[s].keys(): tarr[Obsdata.tkey[s]]['dr'] = station_leakages[s]['R']
+            if 'L' in station_leakages[s].keys(): tarr[Obsdata.tkey[s]]['dl'] = station_leakages[s]['L']
+        ret['tarr'] = tarr
+                
     return ret
 
 ##################################################################################################
 # Wrapper Functions
 ##################################################################################################
 
-def chisq(model, uv, data, sigma, dtype):
+def chisq(model, uv, data, sigma, dtype, jonesdict=None):
     """return the chi^2 for the appropriate dtype
-       TODO? Do we need to specify pol?
     """
 
     chisq = 1
@@ -1114,151 +1349,168 @@ def chisq(model, uv, data, sigma, dtype):
         return chisq
 
     if dtype == 'vis':
-        chisq = chisq_vis(model, uv, data, sigma)
+        chisq = chisq_vis(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'amp':
-        chisq = chisq_amp(model, uv, data, sigma)
+        chisq = chisq_amp(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'logamp':
-        chisq = chisq_logamp(model, uv, data, sigma)
+        chisq = chisq_logamp(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'bs':
-        chisq = chisq_bs(model, uv, data, sigma)
+        chisq = chisq_bs(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'cphase':
-        chisq = chisq_cphase(model, uv, data, sigma)
+        chisq = chisq_cphase(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'cphase_diag':
-        chisq = chisq_cphase_diag(model, uv, data, sigma)
+        chisq = chisq_cphase_diag(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'camp':
-        chisq = chisq_camp(model, uv, data, sigma)
+        chisq = chisq_camp(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'logcamp':
-        chisq = chisq_logcamp(model, uv, data, sigma)
+        chisq = chisq_logcamp(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'logcamp_diag':
-        chisq = chisq_logcamp_diag(model, uv, data, sigma)
+        chisq = chisq_logcamp_diag(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'pvis':
-        chisq = chisq_pvis(model, uv, data, sigma)
+        chisq = chisq_pvis(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'm':
-        chisq = chisq_m(model, uv, data, sigma)
+        chisq = chisq_m(model, uv, data, sigma, jonesdict=jonesdict)
+    elif dtype in ['rlrr','rlll','lrrr','lrll']:
+        chisq = chisq_fracpol(dtype[:2],dtype[2:],model, uv, data, sigma, jonesdict=jonesdict)
 
     return chisq
 
-def chisqgrad(model, uv, data, sigma, dtype, param_mask, fit_gains=False, gains=None, gains_t1=None, gains_t2=None, fit_pol=False, fit_cpol=False):
+def chisqgrad(model, uv, data, sigma, jonesdict, dtype, param_mask, fit_gains=False, gains=None, gains_t1=None, gains_t2=None, fit_pol=False, fit_cpol=False, fit_leakage=False):
     """return the chi^2 gradient for the appropriate dtype
     """
+    global globdict
 
-    chisqgrad = np.zeros_like(param_mask)
+    n_chisqgrad = len(param_mask)
+    if fit_leakage:
+        n_chisqgrad += 2*len(globdict['leakage_fit'])
+
+    chisqgrad = np.zeros(n_chisqgrad)
     if fit_gains:
         gaingrad = np.zeros_like(gains)
     else:
         gaingrad = np.array([])
 
+    # Now we need to be sure to put the gradient in the correct order: model parameters, then gains, then leakage
+    param_mask_full   = np.zeros(len(chisqgrad), dtype=bool) 
+    leakage_mask_full = np.zeros(len(chisqgrad), dtype=bool) 
+    param_mask_full[:len(param_mask)] = param_mask
+    leakage_mask_full[len(param_mask):] = ~leakage_mask_full[len(param_mask):]
+
     if not dtype in DATATERMS:
-        return np.concatenate([chisqgrad[param_mask],gaingrad])
+        return np.concatenate([chisqgrad[param_mask_full],gaingrad,chisqgrad[leakage_mask_full]])
 
     if dtype == 'vis':
-        chisqgrad = chisqgrad_vis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_vis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'amp':
-        chisqgrad = chisqgrad_amp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_amp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
 
         if fit_gains:
-            i1 = model.sample_uv(uv[:,0],uv[:,1])
+            i1 = model.sample_uv(uv[:,0],uv[:,1], jonesdict=jonesdict)
             amp_samples = np.abs(i1)
             amp = data
             pp = ((amp - amp_samples) * amp_samples) / (sigma**2)
             gaingrad = 2.0/(1.0 + np.array(gains)) * np.array([np.sum(pp[(np.array(gains_t1) == j) + (np.array(gains_t2) == j)]) for j in range(len(gains))])/len(data)
     elif dtype == 'logamp':
-        chisqgrad = chisqgrad_logamp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_logamp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'bs':
-        chisqgrad = chisqgrad_bs(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_bs(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'cphase':
-        chisqgrad = chisqgrad_cphase(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_cphase(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'cphase_diag':
-        chisqgrad = chisqgrad_cphase_diag(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_cphase_diag(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'camp':
-        chisqgrad = chisqgrad_camp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_camp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'logcamp':
-        chisqgrad = chisqgrad_logcamp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_logcamp(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'logcamp_diag':
-        chisqgrad = chisqgrad_logcamp_diag(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_logcamp_diag(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'pvis':
-        chisqgrad = chisqgrad_pvis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_pvis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'm':
-        chisqgrad = chisqgrad_m(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol)
+        chisqgrad = chisqgrad_m(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
+    elif dtype in ['rlrr','rlll','lrrr','lrll']:
+        chisqgrad = chisqgrad_fracpol(dtype[:2],dtype[2:],model, uv, data, sigma, jonesdict=jonesdict, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage)
 
-    return np.concatenate([chisqgrad[param_mask],gaingrad])
+    return np.concatenate([chisqgrad[param_mask_full],gaingrad,chisqgrad[leakage_mask_full]])
 
 def chisqdata(Obsdata, dtype, pol='I', **kwargs):
 
     """Return the data, sigma, and matrices for the appropriate dtype
     """
 
-    (data, sigma, uv) = (False, False, False)
+    (data, sigma, uv, jonesdict) = (False, False, False, None)
 
     if dtype == 'vis':
-        (data, sigma, uv) = chisqdata_vis(Obsdata, pol=pol, **kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_vis(Obsdata, pol=pol, **kwargs)
     elif dtype == 'amp' or dtype == 'logamp':
-        (data, sigma, uv) = chisqdata_amp(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_amp(Obsdata, pol=pol,**kwargs)
     elif dtype == 'bs':
-        (data, sigma, uv) = chisqdata_bs(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_bs(Obsdata, pol=pol,**kwargs)
     elif dtype == 'cphase':
-        (data, sigma, uv) = chisqdata_cphase(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_cphase(Obsdata, pol=pol,**kwargs)
     elif dtype == 'cphase_diag':
-        (data, sigma, uv) = chisqdata_cphase_diag(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_cphase_diag(Obsdata, pol=pol,**kwargs)
     elif dtype == 'camp':
-        (data, sigma, uv) = chisqdata_camp(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_camp(Obsdata, pol=pol,**kwargs)
     elif dtype == 'logcamp':
-        (data, sigma, uv) = chisqdata_logcamp(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_logcamp(Obsdata, pol=pol,**kwargs)
     elif dtype == 'logcamp_diag':
-        (data, sigma, uv) = chisqdata_logcamp_diag(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_logcamp_diag(Obsdata, pol=pol,**kwargs)
     elif dtype == 'pvis':
-        (data, sigma, uv) = chisqdata_pvis(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_pvis(Obsdata, pol=pol,**kwargs)
     elif dtype == 'm':
-        (data, sigma, uv) = chisqdata_m(Obsdata, pol=pol,**kwargs)
+        (data, sigma, uv, jonesdict) = chisqdata_m(Obsdata, pol=pol,**kwargs)
+    elif dtype in ['rlrr','rlll','lrrr','lrll']:
+        (data, sigma, uv, jonesdict) = chisqdata_fracpol(Obsdata,dtype[:2],dtype[2:],jonesdict=jonesdict)
 
-    return (data, sigma, uv)
+    return (data, sigma, uv, jonesdict)
 
 
 ##################################################################################################
 # Chi-squared and Gradient Functions
 ##################################################################################################
 
-def chisq_vis(model, uv, vis, sigma):
+def chisq_vis(model, uv, vis, sigma, jonesdict=None):
     """Visibility chi-squared"""
 
-    samples = model.sample_uv(uv[:,0],uv[:,1])
+    samples = model.sample_uv(uv[:,0],uv[:,1], jonesdict=jonesdict)
     return np.sum(np.abs((samples-vis)/sigma)**2)/(2*len(vis))
 
-def chisqgrad_vis(model, uv, vis, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_vis(model, uv, vis, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the visibility chi-squared"""
 
-    samples = model.sample_uv(uv[:,0],uv[:,1])
+    samples = model.sample_uv(uv[:,0],uv[:,1], jonesdict=jonesdict)
     wdiff   = (vis - samples)/(sigma**2)
-    grad    = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    grad    = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
 
     out = -np.real(np.dot(grad.conj(), wdiff))/len(vis)
     return out
 
-def chisq_amp(model, uv, amp, sigma):
+def chisq_amp(model, uv, amp, sigma, jonesdict=None):
     """Visibility Amplitudes (normalized) chi-squared"""
 
-    amp_samples = np.abs(model.sample_uv(uv[:,0],uv[:,1]))
+    amp_samples = np.abs(model.sample_uv(uv[:,0],uv[:,1], jonesdict=jonesdict))
     return np.sum(np.abs((amp - amp_samples)/sigma)**2)/len(amp)
 
-def chisqgrad_amp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_amp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the amplitude chi-squared"""
 
-    i1 = model.sample_uv(uv[:,0],uv[:,1])
+    i1 = model.sample_uv(uv[:,0],uv[:,1], jonesdict=jonesdict)
     amp_samples = np.abs(i1)
 
     pp = ((amp - amp_samples) * amp_samples) / (sigma**2) / i1
-    grad = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol)
+    grad = model.sample_grad_uv(uv[:,0],uv[:,1],fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
     out = (-2.0/len(amp)) * np.real(np.dot(grad, pp))
     return out
 
-def chisq_bs(model, uv, bis, sigma):
+def chisq_bs(model, uv, bis, sigma, jonesdict=None):
     """Bispectrum chi-squared"""
 
     bisamples = model.sample_uv(uv[0][:,0],uv[0][:,1]) * model.sample_uv(uv[1][:,0],uv[1][:,1]) * model.sample_uv(uv[2][:,0],uv[2][:,1])
     chisq= np.sum(np.abs(((bis - bisamples)/sigma))**2)/(2.*len(bis))
     return chisq
 
-def chisqgrad_bs(model, uv, bis, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_bs(model, uv, bis, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the bispectrum chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
@@ -1275,7 +1527,7 @@ def chisqgrad_bs(model, uv, bis, sigma, fit_pol=False, fit_cpol=False):
     out = -np.real(np.dot(pt1, V1_grad.T) + np.dot(pt2, V2_grad.T) + np.dot(pt3, V3_grad.T))/len(bis)
     return out
 
-def chisq_cphase(model, uv, clphase, sigma):
+def chisq_cphase(model, uv, clphase, sigma, jonesdict=None):
     """Closure Phases (normalized) chi-squared"""
     clphase = clphase * DEGREE
     sigma = sigma * DEGREE
@@ -1288,7 +1540,7 @@ def chisq_cphase(model, uv, clphase, sigma):
     chisq= (2.0/len(clphase)) * np.sum((1.0 - np.cos(clphase-clphase_samples))/(sigma**2))
     return chisq
 
-def chisqgrad_cphase(model, uv, clphase, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_cphase(model, uv, clphase, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the closure phase chi-squared"""
     clphase = clphase * DEGREE
     sigma = sigma * DEGREE
@@ -1309,7 +1561,7 @@ def chisqgrad_cphase(model, uv, clphase, sigma, fit_pol=False, fit_cpol=False):
     out  = -(2.0/len(clphase)) * np.imag(np.dot(pt1, V1_grad.T) + np.dot(pt2, V2_grad.T) + np.dot(pt3, V3_grad.T))
     return out
 
-def chisq_cphase_diag(model, uv, clphase_diag, sigma):
+def chisq_cphase_diag(model, uv, clphase_diag, sigma, jonesdict=None):
     """Diagonalized closure phases (normalized) chi-squared"""
     clphase_diag = np.concatenate(clphase_diag) * DEGREE
     sigma = np.concatenate(sigma) * DEGREE
@@ -1330,7 +1582,7 @@ def chisq_cphase_diag(model, uv, clphase_diag, sigma):
     chisq = (2.0/len(clphase_diag)) * np.sum((1.0 - np.cos(clphase_diag-clphase_diag_samples))/(sigma**2))
     return chisq
 
-def chisqgrad_cphase_diag(model, uv, clphase_diag, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_cphase_diag(model, uv, clphase_diag, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the diagonalized closure phase chi-squared"""
     clphase_diag = clphase_diag * DEGREE
     sigma = sigma * DEGREE
@@ -1364,7 +1616,7 @@ def chisqgrad_cphase_diag(model, uv, clphase_diag, sigma, fit_pol=False, fit_cpo
 
     return deriv
 
-def chisq_camp(model, uv, clamp, sigma):
+def chisq_camp(model, uv, clamp, sigma, jonesdict=None):
     """Closure Amplitudes (normalized) chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
@@ -1376,7 +1628,7 @@ def chisq_camp(model, uv, clamp, sigma):
     chisq = np.sum(np.abs((clamp - clamp_samples)/sigma)**2)/len(clamp)
     return chisq
 
-def chisqgrad_camp(model, uv, clamp, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_camp(model, uv, clamp, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the closure amplitude chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
@@ -1398,7 +1650,7 @@ def chisqgrad_camp(model, uv, clamp, sigma, fit_pol=False, fit_cpol=False):
     out = (-2.0/len(clamp)) * np.real(np.dot(pt1, V1_grad.T) + np.dot(pt2, V2_grad.T) + np.dot(pt3, V3_grad.T) + np.dot(pt4, V4_grad.T))
     return out
 
-def chisq_logcamp(model, uv, log_clamp, sigma):
+def chisq_logcamp(model, uv, log_clamp, sigma, jonesdict=None):
     """Log Closure Amplitudes (normalized) chi-squared"""
 
     a1 = np.abs(model.sample_uv(uv[0][:,0],uv[0][:,1]))
@@ -1410,7 +1662,7 @@ def chisq_logcamp(model, uv, log_clamp, sigma):
     chisq = np.sum(np.abs((log_clamp - samples)/sigma)**2) / (len(log_clamp))
     return  chisq
 
-def chisqgrad_logcamp(model, uv, log_clamp, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_logcamp(model, uv, log_clamp, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the Log closure amplitude chi-squared"""
 
     V1 = model.sample_uv(uv[0][:,0],uv[0][:,1])
@@ -1432,7 +1684,7 @@ def chisqgrad_logcamp(model, uv, log_clamp, sigma, fit_pol=False, fit_cpol=False
     out = (-2.0/len(log_clamp)) * np.real(np.dot(pt1, V1_grad.T) + np.dot(pt2, V2_grad.T) + np.dot(pt3, V3_grad.T) + np.dot(pt4, V4_grad.T))
     return out
 
-def chisq_logcamp_diag(model, uv, log_clamp_diag, sigma):
+def chisq_logcamp_diag(model, uv, log_clamp_diag, sigma, jonesdict=None):
     """Diagonalized log closure amplitudes (normalized) chi-squared"""
 
     log_clamp_diag = np.concatenate(log_clamp_diag)
@@ -1457,7 +1709,7 @@ def chisq_logcamp_diag(model, uv, log_clamp_diag, sigma):
     chisq = np.sum(np.abs((log_clamp_diag - log_clamp_diag_samples)/sigma)**2) / (len(log_clamp_diag))
     return  chisq
 
-def chisqgrad_logcamp_diag(model, uv, log_clamp_diag, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_logcamp_diag(model, uv, log_clamp_diag, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the diagonalized log closure amplitude chi-squared"""
 
     uv_diag = uv[0]
@@ -1492,7 +1744,7 @@ def chisqgrad_logcamp_diag(model, uv, log_clamp_diag, sigma, fit_pol=False, fit_
 
     return deriv
 
-def chisq_logamp(model, uv, amp, sigma):
+def chisq_logamp(model, uv, amp, sigma, jonesdict=None):
     """Log Visibility Amplitudes (normalized) chi-squared"""
 
     # to lowest order the variance on the logarithm of a quantity x is
@@ -1502,7 +1754,7 @@ def chisq_logamp(model, uv, amp, sigma):
     amp_samples = np.abs(model.sample_uv(uv[:,0],uv[:,1]))
     return np.sum(np.abs((np.log(amp) - np.log(amp_samples))/logsigma)**2)/len(amp)
 
-def chisqgrad_logamp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_logamp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the Log amplitude chi-squared"""
 
     # to lowest order the variance on the logarithm of a quantity x is
@@ -1519,44 +1771,68 @@ def chisqgrad_logamp(model, uv, amp, sigma, fit_pol=False, fit_cpol=False):
     return out
 
 
-def chisq_pvis(model, uv, pvis, psigma):
+def chisq_pvis(model, uv, pvis, psigma, jonesdict=None):
     """Polarimetric visibility chi-squared
     """
 
-    psamples = model.sample_uv(uv[:,0],uv[:,1],pol='P')
+    psamples = model.sample_uv(uv[:,0],uv[:,1],pol='P',jonesdict=jonesdict)
     return np.sum(np.abs((psamples-pvis)/psigma)**2)/(2*len(pvis))
 
-def chisqgrad_pvis(model, uv, pvis, psigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_pvis(model, uv, pvis, psigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """Polarimetric visibility chi-squared gradient
     """
-    samples = model.sample_uv(uv[:,0],uv[:,1],pol='P')
+    samples = model.sample_uv(uv[:,0],uv[:,1],pol='P',jonesdict=jonesdict)
     wdiff   = (pvis - samples)/(psigma**2)
-    grad    = model.sample_grad_uv(uv[:,0],uv[:,1],pol='P',fit_pol=fit_pol,fit_cpol=fit_cpol)
+    grad    = model.sample_grad_uv(uv[:,0],uv[:,1],pol='P',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
 
     out = -np.real(np.dot(grad.conj(), wdiff))/len(pvis)
     return out
 
-def chisq_m(model, uv, m, msigma):
+def chisq_m(model, uv, m, msigma, jonesdict=None):
     """Polarimetric ratio chi-squared
     """
 
-    msamples = model.sample_uv(uv[:,0],uv[:,1],pol='P')/model.sample_uv(uv[:,0],uv[:,1],pol='I')
+    msamples = model.sample_uv(uv[:,0],uv[:,1],pol='P',jonesdict=jonesdict)/model.sample_uv(uv[:,0],uv[:,1],pol='I',jonesdict=jonesdict)
 
     return np.sum(np.abs((m - msamples))**2/(msigma**2)) / (2*len(m))   
 
-def chisqgrad_m(model, uv, mvis, msigma, fit_pol=False, fit_cpol=False):
+def chisqgrad_m(model, uv, mvis, msigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
     """The gradient of the polarimetric ratio chisq
     """
 
-    samp_P   = model.sample_uv(uv[:,0],uv[:,1],pol='P')
-    samp_I   = model.sample_uv(uv[:,0],uv[:,1],pol='I')
-    grad_P   = model.sample_grad_uv(uv[:,0],uv[:,1],pol='P',fit_pol=fit_pol,fit_cpol=fit_cpol)
-    grad_I   = model.sample_grad_uv(uv[:,0],uv[:,1],pol='I',fit_pol=fit_pol,fit_cpol=fit_cpol)
+    samp_P   = model.sample_uv(uv[:,0],uv[:,1],pol='P',jonesdict=jonesdict)
+    samp_I   = model.sample_uv(uv[:,0],uv[:,1],pol='I',jonesdict=jonesdict)
+    grad_P   = model.sample_grad_uv(uv[:,0],uv[:,1],pol='P',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+    grad_I   = model.sample_grad_uv(uv[:,0],uv[:,1],pol='I',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
 
     msamples = samp_P/samp_I
     wdiff   = (mvis - msamples)/(msigma**2)
     # Get the gradient from the quotient rule
     grad    = ( grad_P * samp_I - grad_I * samp_P)/samp_I**2
+
+    return -np.real(np.dot(grad.conj(), wdiff))/len(mvis)
+
+def chisq_fracpol(upper, lower, model, uv, m, msigma, jonesdict=None):
+    """Polarimetric ratio chi-squared
+    """
+
+    msamples = model.sample_uv(uv[:,0],uv[:,1],pol=upper.upper(),jonesdict=jonesdict)/model.sample_uv(uv[:,0],uv[:,1],pol=lower.upper(),jonesdict=jonesdict)
+
+    return np.sum(np.abs((m - msamples))**2/(msigma**2)) / (2*len(m))   
+
+def chisqgrad_fracpol(upper, lower, model, uv, mvis, msigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
+    """The gradient of the polarimetric ratio chisq
+    """
+
+    samp_upper = model.sample_uv(uv[:,0],uv[:,1],pol=upper.upper(),jonesdict=jonesdict)
+    samp_lower = model.sample_uv(uv[:,0],uv[:,1],pol=lower.upper(),jonesdict=jonesdict)
+    grad_upper = model.sample_grad_uv(uv[:,0],uv[:,1],pol=upper.upper(),fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+    grad_lower = model.sample_grad_uv(uv[:,0],uv[:,1],pol=lower.upper(),fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+
+    msamples = samp_upper/samp_lower
+    wdiff   = (mvis - msamples)/(msigma**2)
+    # Get the gradient from the quotient rule
+    grad    = ( grad_upper * samp_lower - grad_lower * samp_upper)/samp_lower**2
 
     return -np.real(np.dot(grad.conj(), wdiff))/len(mvis)
 
@@ -1614,6 +1890,41 @@ def apply_systematic_noise_snrcut(data_arr, systematic_noise, snrcut, pol):
     uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))[mask]
     return (uv, vis, amp, sigma)
 
+def make_jonesdict(Obsdata, data_arr):
+    # Make a dictionary with entries needed to form the Jones matrices
+    # Currently, this only works for data types on a single baseline (e.g., closure quantities aren't supported yet)
+
+    # Get the names of each station for every measurement
+    t1 = data_arr['t1']
+    t2 = data_arr['t2']
+
+    # Get the elevation of each station
+    el1  = data_arr['el1']*np.pi/180.
+    el2  = data_arr['el2']*np.pi/180.
+
+    # Get the parallactic angle of each station
+    par1 = data_arr['par_ang1']*np.pi/180.
+    par2 = data_arr['par_ang2']*np.pi/180.
+
+    # Compute the full field rotation angle for each site, based information in the Obsdata Array
+    fr_elev1 = np.array([Obsdata.tarr[Obsdata.tkey[o['t1']]]['fr_elev'] for o in data_arr])
+    fr_elev2 = np.array([Obsdata.tarr[Obsdata.tkey[o['t2']]]['fr_elev'] for o in data_arr])
+    fr_par1  = np.array([Obsdata.tarr[Obsdata.tkey[o['t1']]]['fr_par']  for o in data_arr])
+    fr_par2  = np.array([Obsdata.tarr[Obsdata.tkey[o['t2']]]['fr_par']  for o in data_arr])
+    fr_off1  = np.array([Obsdata.tarr[Obsdata.tkey[o['t1']]]['fr_off']  for o in data_arr])
+    fr_off2  = np.array([Obsdata.tarr[Obsdata.tkey[o['t2']]]['fr_off']  for o in data_arr])
+    fr1 = fr_elev1*el1 + fr_par1*par1 + fr_off1*np.pi/180.
+    fr2 = fr_elev2*el2 + fr_par2*par2 + fr_off2*np.pi/180.
+
+    # Now populate the left and right D-term entries based on the Obsdata Array
+    DR1 = np.array([Obsdata.tarr[Obsdata.tkey[o['t1']]]['dr'] for o in data_arr])
+    DL1 = np.array([Obsdata.tarr[Obsdata.tkey[o['t1']]]['dl'] for o in data_arr])
+    DR2 = np.array([Obsdata.tarr[Obsdata.tkey[o['t2']]]['dr'] for o in data_arr])
+    DL2 = np.array([Obsdata.tarr[Obsdata.tkey[o['t2']]]['dl'] for o in data_arr])
+
+    return {'fr1':fr1,'fr2':fr2,'t1':t1,'t2':t2, 
+            'DR1':DR1, 'DR2':DR2, 'DL1':DL1, 'DL2':DL2}
+
 def chisqdata_vis(Obsdata, pol='I', **kwargs):
     """Return the data, sigmas, and fourier matrix for visibilities
     """
@@ -1628,10 +1939,12 @@ def chisqdata_vis(Obsdata, pol='I', **kwargs):
     vtype=vis_poldict[pol]
     atype=amp_poldict[pol]
     etype=sig_poldict[pol]
-    data_arr = Obsdata.unpack(['t1','t2','u','v',vtype,atype,etype], debias=debias)
+    data_arr = Obsdata.unpack(['t1','t2','u','v',vtype,atype,etype,'el1','el2','par_ang1','par_ang2'], debias=debias)
     (uv, vis, amp, sigma) = apply_systematic_noise_snrcut(data_arr, systematic_noise, snrcut, pol)
 
-    return (vis, sigma, uv)
+    jonesdict = make_jonesdict(Obsdata, data_arr)
+
+    return (vis, sigma, uv, jonesdict)
 
 def chisqdata_amp(Obsdata, pol='I',**kwargs):
     """Return the data, sigmas, and fourier matrix for visibility amplitudes
@@ -1648,7 +1961,7 @@ def chisqdata_amp(Obsdata, pol='I',**kwargs):
     atype=amp_poldict[pol]
     etype=sig_poldict[pol]
     if (Obsdata.amp is None) or (len(Obsdata.amp)==0) or pol!='I':
-        data_arr = Obsdata.unpack(['time','t1','t2','u','v',vtype,atype,etype], debias=debias)
+        data_arr = Obsdata.unpack(['time','t1','t2','u','v',vtype,atype,etype,'el1','el2','par_ang1','par_ang2'], debias=debias)
 
     else: # TODO -- pre-computed  with not stokes I? 
         print("Using pre-computed amplitude table in amplitude chi^2!")
@@ -1664,8 +1977,10 @@ def chisqdata_amp(Obsdata, pol='I',**kwargs):
     # data weighting
     if weighting=='uniform':
         sigma = np.median(sigma) * np.ones(len(sigma))
+        
+    jonesdict = make_jonesdict(Obsdata, data_arr)
 
-    return (amp, sigma, uv)
+    return (amp, sigma, uv, jonesdict)
 
 def chisqdata_bs(Obsdata, pol='I',**kwargs):
     """return the data, sigmas, and fourier matrices for bispectra
@@ -1708,7 +2023,7 @@ def chisqdata_bs(Obsdata, pol='I',**kwargs):
     if weighting=='uniform':
         sigma = np.median(sigma) * np.ones(len(sigma))
 
-    return (bi, sigma, (uv1, uv2, uv3))
+    return (bi, sigma, (uv1, uv2, uv3), None)
 
 def chisqdata_cphase(Obsdata, pol='I',**kwargs):
     """Return the data, sigmas, and fourier matrices for closure phases
@@ -1750,7 +2065,7 @@ def chisqdata_cphase(Obsdata, pol='I',**kwargs):
     if weighting=='uniform':
         sigma = np.median(sigma) * np.ones(len(sigma))
 
-    return (clphase, sigma, (uv1, uv2, uv3))
+    return (clphase, sigma, (uv1, uv2, uv3), None)
 
 def chisqdata_cphase_diag(Obsdata, pol='I',**kwargs):
     """Return the data, sigmas, and fourier matrices for diagonalized closure phases
@@ -1805,7 +2120,7 @@ def chisqdata_cphase_diag(Obsdata, pol='I',**kwargs):
     # combine Fourier and transformation matrices into tuple for outputting
     uvmatrices = (np.array(uv_diag),np.array(tform_mats))
 
-    return (np.array(clphase_diag), np.array(sigma_diag), uvmatrices)
+    return (np.array(clphase_diag), np.array(sigma_diag), uvmatrices, None)
 
 def chisqdata_camp(Obsdata, pol='I',**kwargs):
     """Return the data, sigmas, and fourier matrices for closure amplitudes
@@ -1843,7 +2158,7 @@ def chisqdata_camp(Obsdata, pol='I',**kwargs):
     if weighting=='uniform':
         sigma = np.median(sigma) * np.ones(len(sigma))
 
-    return (clamp, sigma, (uv1, uv2, uv3, uv4))
+    return (clamp, sigma, (uv1, uv2, uv3, uv4), None)
 
 def chisqdata_logcamp(Obsdata, pol='I', **kwargs):
     """Return the data, sigmas, and fourier matrices for log closure amplitudes
@@ -1881,7 +2196,7 @@ def chisqdata_logcamp(Obsdata, pol='I', **kwargs):
     if weighting=='uniform':
         sigma = np.median(sigma) * np.ones(len(sigma))
 
-    return (clamp, sigma, (uv1, uv2, uv3, uv4))
+    return (clamp, sigma, (uv1, uv2, uv3, uv4), None)
 
 def chisqdata_logcamp_diag(Obsdata, pol='I', **kwargs):
     """Return the data, sigmas, and fourier matrices for diagonalized log closure amplitudes
@@ -1940,15 +2255,39 @@ def chisqdata_logcamp_diag(Obsdata, pol='I', **kwargs):
     # combine Fourier and transformation matrices into tuple for outputting
     uvmatrices = (np.array(uv_diag),np.array(tform_mats))
 
-    return (np.array(clamp_diag), np.array(sigma_diag), uvmatrices)
+    return (np.array(clamp_diag), np.array(sigma_diag), uvmatrices, None)
 
 def chisqdata_pvis(Obsdata, pol='I', **kwargs):
-    data_arr = Obsdata.unpack(['t1','t2','u','v','pvis','psigma'], conj=True)
+    data_arr = Obsdata.unpack(['t1','t2','u','v','pvis','psigma','el1','el2','par_ang1','par_ang2'], conj=True)
     uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))
-    return (data_arr['pvis'], data_arr['psigma'], uv)
+    mask = np.isfinite(data_arr['pvis'] + data_arr['psigma']) # don't include nan (missing data) or inf (division by zero)
+    jonesdict = make_jonesdict(Obsdata, data_arr[mask])
+    return (data_arr['pvis'][mask], data_arr['psigma'][mask], uv[mask], jonesdict)
 
 def chisqdata_m(Obsdata, pol='I',**kwargs):
     debias = kwargs.get('debias',True)
-    data_arr = Obsdata.unpack(['t1','t2','u','v','m','msigma'], conj=True, debias=debias)
+    data_arr = Obsdata.unpack(['t1','t2','u','v','m','msigma','el1','el2','par_ang1','par_ang2'], conj=True, debias=False)
     uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))
-    return (data_arr['m'], data_arr['msigma'], uv)
+    mask = np.isfinite(data_arr['m'] + data_arr['msigma']) # don't include nan (missing data) or inf (division by zero)
+    jonesdict = make_jonesdict(Obsdata, data_arr[mask])
+    return (data_arr['m'][mask], data_arr['msigma'][mask], uv[mask], jonesdict)
+
+def chisqdata_fracpol(Obsdata, pol_upper,pol_lower,**kwargs):
+    debias = kwargs.get('debias',True)
+    data_arr = Obsdata.unpack(['t1','t2','u','v','m','msigma','el1','el2','par_ang1','par_ang2','rrvis','rlvis','lrvis','llvis','rramp','rlamp','lramp','llamp','rrsigma','rlsigma','lrsigma','llsigma'], conj=False, debias=True)
+    uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))
+
+    upper = data_arr[pol_upper + 'vis']
+    lower = data_arr[pol_lower + 'vis']
+    upper_amp = data_arr[pol_upper + 'amp']
+    lower_amp = data_arr[pol_lower + 'amp']
+    upper_sig = data_arr[pol_upper + 'sigma']
+    lower_sig = data_arr[pol_lower + 'sigma']    
+
+    sig = ((upper_sig/lower_amp)**2 + (lower_sig*upper_amp/lower_amp**2)**2)**0.5
+
+    # Mask bad data
+    mask = np.isfinite(upper + lower + sig) # don't include nan (missing data) or inf (division by zero)
+    jonesdict = make_jonesdict(Obsdata, data_arr[mask])
+
+    return ((upper/lower)[mask], sig[mask], uv[mask], jonesdict)

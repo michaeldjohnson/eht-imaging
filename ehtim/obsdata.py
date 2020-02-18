@@ -997,8 +997,8 @@ class Obsdata(object):
 
         # Model -- single chi^2
         elif hasattr(im_or_mov,'N_models'):            
-            (data, sigma, uv) = mu.chisqdata(self, dtype, pol, **kwargs)
-            chisq = mu.chisq(im_or_mov, uv, data, sigma, dtype)
+            (data, sigma, uv, jonesdict) = mu.chisqdata(self, dtype, pol, **kwargs)
+            chisq = mu.chisq(im_or_mov, uv, data, sigma, dtype, jonesdict)
 
         # Image -- single chi^2
         else:
