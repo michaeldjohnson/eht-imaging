@@ -124,11 +124,13 @@ def default_prior(model_type,model_params=None,fit_pol=False,fit_cpol=False):
 
     if COMPLEX_BASIS == 're-im':
         complex_labels = ['_re','_im']
-        complex_priors = [{'prior_type':'flat','min':-0.5,'max':0.5}, {'prior_type':'flat','min':-0.5,'max':0.5}]
+        complex_priors  = [{'prior_type':'flat','min':-0.5,'max':0.5}, {'prior_type':'flat','min':-0.5,'max':0.5}]
+        complex_priors2 = [{'prior_type':'flat','min':-1,'max':1}, {'prior_type':'flat','min':-1,'max':1}]
     elif COMPLEX_BASIS == 'abs-arg':
         complex_labels = ['_abs','_arg']
         # Note: angle range here must match np.angle(). Need to properly define wrapped distributions
-        complex_priors = [{'prior_type':'flat','min':0.0,'max':0.5}, {'prior_type':'flat','min':-np.pi, 'max':np.pi}] 
+        complex_priors  = [{'prior_type':'flat','min':0.0,'max':0.5}, {'prior_type':'flat','min':-np.pi, 'max':np.pi}] 
+        complex_priors2 = [{'prior_type':'flat','min':0.0,'max':1.0}, {'prior_type':'flat','min':-np.pi, 'max':np.pi}] 
     else:
         raise Exception('COMPLEX_BASIS ' + COMPLEX_BASIS + ' not recognized!')
 
@@ -194,16 +196,16 @@ def default_prior(model_type,model_params=None,fit_pol=False,fit_cpol=False):
             prior['pol_evpa'] = {'prior_type':'flat','min':0.0,'max':np.pi}
         else:            
             for j in range(-(len(model_params['beta_list_pol'])-1)//2,(len(model_params['beta_list_pol'])+1)//2):
-                prior['betapol' + str(j) + complex_labels[0]] = complex_priors[0]
-                prior['betapol' + str(j) + complex_labels[1]] = complex_priors[1]
+                prior['betapol' + str(j) + complex_labels[0]] = complex_priors2[0]
+                prior['betapol' + str(j) + complex_labels[1]] = complex_priors2[1]
 
     if fit_cpol:
         if model_type.find('mring') == -1:
             prior['cpol_frac'] = {'prior_type':'flat','min':-1.0,'max':1.0}
         else:
             for j in range(len(model_params['beta_list_cpol'])):
-                prior['betacpol' + str(j) + complex_labels[0]] = complex_priors[0]
-                prior['betacpol' + str(j) + complex_labels[1]] = complex_priors[1]
+                prior['betacpol' + str(j) + complex_labels[0]] = complex_priors2[0]
+                prior['betacpol' + str(j) + complex_labels[1]] = complex_priors2[1]
 
     return prior
 

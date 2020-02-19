@@ -360,13 +360,13 @@ def compute_likelihood_constants(d1, d2, d3, sigma1, sigma2, sigma3):
         ln_norm3 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma3))
     except: pass
 
-    if d1 in ['vis','bs','m','pvis','lrll','rlll','lrrr','rlrr']:
+    if d1 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr']:
         alpha_d1 *= 2
         ln_norm1 *= 2
-    if d2 in ['vis','bs','m','pvis','lrll','rlll','lrrr','rlrr']:
+    if d2 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr']:
         alpha_d2 *= 2
         ln_norm2 *= 2
-    if d3 in ['vis','bs','m','pvis','lrll','rlll','lrrr','rlrr']:
+    if d3 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr']:
         alpha_d3 *= 2
         ln_norm3 *= 2
     ln_norm = ln_norm1 + ln_norm2 + ln_norm3
@@ -861,7 +861,7 @@ def modeler_func(Obsdata, model_init, model_prior,
     run_nested_kwargs = kwargs.get('run_nested_kwargs',{})
 
     # Make sure data and regularizer options are ok
-    if not d1 and not d2:
+    if not d1 and not d2 and not d3:
         raise Exception("Must have at least one data term!")
     if (not ((d1 in DATATERMS) or d1==False)) or (not ((d2 in DATATERMS) or d2==False)):
         raise Exception("Invalid data term: valid data terms are: " + ' '.join(DATATERMS))
@@ -1168,7 +1168,7 @@ def modeler_func(Obsdata, model_init, model_prior,
             pool = mp.Pool(processes=processes, initializer=init, initargs=(globdict,))
             if not quiet: print('Using a pool with %d processes' % processes)
         else:
-            pool = processes = use_pool = None
+            pool = processes = None
             
         # Setup the sampler
         if minimizer_func == 'dynesty_static':
@@ -1178,6 +1178,10 @@ def modeler_func(Obsdata, model_init, model_prior,
 
         # Run the sampler
         sampler.run_nested(**run_nested_kwargs)
+
+        # Close the pool (this may not be the desired behavior if the sampling is to be iterative!)
+        if pool is not None:
+            pool.close()
 
         # Print the sampler summary
         res = sampler.results
@@ -1191,6 +1195,7 @@ def modeler_func(Obsdata, model_init, model_prior,
         mean, cov = dyfunc.mean_and_cov(samples, weights)
 
         # Compute the log-posterior
+        if not quiet: print('Calculating the posterior values for the samples...')
         logposterior = np.array([-objfunc(x, force_posterior=True) for x in samples])
 
         # Select the MAP
@@ -1212,6 +1217,7 @@ def modeler_func(Obsdata, model_init, model_prior,
         ret['map'] = MAP
         ret['std']  = cov.diagonal()**0.5
         ret['samples'] = samples
+        ret['logposterior'] = logposterior
 
         # Return a set of models from the posterior
         posterior_models = []
@@ -1370,7 +1376,7 @@ def chisq(model, uv, data, sigma, dtype, jonesdict=None):
         chisq = chisq_pvis(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype == 'm':
         chisq = chisq_m(model, uv, data, sigma, jonesdict=jonesdict)
-    elif dtype in ['rlrr','rlll','lrrr','lrll']:
+    elif dtype in ['rrll','llrr','rlrr','rlll','lrrr','lrll']:
         chisq = chisq_fracpol(dtype[:2],dtype[2:],model, uv, data, sigma, jonesdict=jonesdict)
 
     return chisq
@@ -1428,7 +1434,7 @@ def chisqgrad(model, uv, data, sigma, jonesdict, dtype, param_mask, fit_gains=Fa
         chisqgrad = chisqgrad_pvis(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype == 'm':
         chisqgrad = chisqgrad_m(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
-    elif dtype in ['rlrr','rlll','lrrr','lrll']:
+    elif dtype in ['rrll','llrr','rlrr','rlll','lrrr','lrll']:
         chisqgrad = chisqgrad_fracpol(dtype[:2],dtype[2:],model, uv, data, sigma, jonesdict=jonesdict, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage)
 
     return np.concatenate([chisqgrad[param_mask_full],gaingrad,chisqgrad[leakage_mask_full]])
@@ -1460,7 +1466,7 @@ def chisqdata(Obsdata, dtype, pol='I', **kwargs):
         (data, sigma, uv, jonesdict) = chisqdata_pvis(Obsdata, pol=pol,**kwargs)
     elif dtype == 'm':
         (data, sigma, uv, jonesdict) = chisqdata_m(Obsdata, pol=pol,**kwargs)
-    elif dtype in ['rlrr','rlll','lrrr','lrll']:
+    elif dtype in ['rrll','llrr','rlrr','rlll','lrrr','lrll']:
         (data, sigma, uv, jonesdict) = chisqdata_fracpol(Obsdata,dtype[:2],dtype[2:],jonesdict=jonesdict)
 
     return (data, sigma, uv, jonesdict)
