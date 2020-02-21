@@ -62,7 +62,7 @@ BOUNDS_EXP_NSIGMA = 10.
 
 PRIOR_MIN = 1e-200 # to avoid problems with log-prior
 
-DATATERMS = ['vis', 'bs', 'amp', 'cphase', 'cphase_diag', 'camp', 'logcamp', 'logcamp_diag', 'logamp', 'pvis', 'm', 'rlrr', 'rlll', 'lrrr', 'lrll','rrll','llrr']
+DATATERMS = ['vis', 'bs', 'amp', 'cphase', 'cphase_diag', 'camp', 'logcamp', 'logcamp_diag', 'logamp', 'pvis', 'm', 'rlrr', 'rlll', 'lrrr', 'lrll','rrll','llrr','polclosure']
 
 nit = 0       # global variable to track the iteration number in the plotting callback
 globdict = {} # global dictionary with all parameters related to the model fitting (mainly for efficient parallelization, but also very useful for debugging)
@@ -360,13 +360,13 @@ def compute_likelihood_constants(d1, d2, d3, sigma1, sigma2, sigma3):
         ln_norm3 = -np.sum(np.log((2.0*np.pi)**0.5 * sigma3))
     except: pass
 
-    if d1 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr']:
+    if d1 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr','polclosure']:
         alpha_d1 *= 2
         ln_norm1 *= 2
-    if d2 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr']:
+    if d2 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr','polclosure']:
         alpha_d2 *= 2
         ln_norm2 *= 2
-    if d3 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr']:
+    if d3 in ['vis','bs','m','pvis','rrll','llrr','lrll','rlll','lrrr','rlrr','polclosure']:
         alpha_d3 *= 2
         ln_norm3 *= 2
     ln_norm = ln_norm1 + ln_norm2 + ln_norm3
@@ -766,15 +766,16 @@ def objgrad(params):
         dx = 1e-10
         grad_numeric = np.zeros(len(grad))
         f1 = objfunc(params)
+        print('\nNumeric Gradient Check: Analytic Numeric')
         for j in range(len(grad)):
             params2 = copy.deepcopy(params)
             params2[j] += dx                
             f2 = objfunc(params2)
             grad_numeric[j] = (f2 - f1)/dx
             if j < globdict['n_params']:
-                print('\nNumeric Gradient Check: ',globdict['param_map'][j][0],globdict['param_map'][j][1],grad[j],grad_numeric[j])
+                print('\nNumeric Gradient Check:',globdict['param_map'][j][0],globdict['param_map'][j][1],grad[j],grad_numeric[j])
             else:
-                print('\nNumeric Gradient Check: ',grad[j],grad_numeric[j])
+                print('\nNumeric Gradient Check:',grad[j],grad_numeric[j])
 
     return grad
 
@@ -905,7 +906,6 @@ def modeler_func(Obsdata, model_init, model_prior,
                             leakage_prior[s][pol][cpart] = copy.deepcopy(leakage_prior_init[s])
                         else:
                             leakage_prior[s][pol][cpart] = copy.deepcopy(LEAKAGE_PRIOR_DEFAULT)
-            print('leakage prior',leakage_prior)
 
             if Obsdata.polrep == 'stokes':                
                 for s in sites:
@@ -1313,6 +1313,8 @@ def modeler_func(Obsdata, model_init, model_prior,
     ret['model']     = trial_model
     ret['res']       = res
     ret['param_map'] = param_map    
+    ret['chisq_list'] = chisq_list(gains)
+
     if fit_gains:
         ret['gains'] = gains
     
@@ -1378,6 +1380,8 @@ def chisq(model, uv, data, sigma, dtype, jonesdict=None):
         chisq = chisq_m(model, uv, data, sigma, jonesdict=jonesdict)
     elif dtype in ['rrll','llrr','rlrr','rlll','lrrr','lrll']:
         chisq = chisq_fracpol(dtype[:2],dtype[2:],model, uv, data, sigma, jonesdict=jonesdict)
+    elif dtype == 'polclosure':
+        chisq = chisq_polclosure(model, uv, data, sigma, jonesdict=jonesdict)
 
     return chisq
 
@@ -1436,6 +1440,8 @@ def chisqgrad(model, uv, data, sigma, jonesdict, dtype, param_mask, fit_gains=Fa
         chisqgrad = chisqgrad_m(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
     elif dtype in ['rrll','llrr','rlrr','rlll','lrrr','lrll']:
         chisqgrad = chisqgrad_fracpol(dtype[:2],dtype[2:],model, uv, data, sigma, jonesdict=jonesdict, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage)
+    elif dtype == 'polclosure':
+        chisqgrad = chisqgrad_polclosure(model, uv, data, sigma, fit_pol=fit_pol, fit_cpol=fit_cpol, fit_leakage=fit_leakage, jonesdict=jonesdict)
 
     return np.concatenate([chisqgrad[param_mask_full],gaingrad,chisqgrad[leakage_mask_full]])
 
@@ -1468,6 +1474,8 @@ def chisqdata(Obsdata, dtype, pol='I', **kwargs):
         (data, sigma, uv, jonesdict) = chisqdata_m(Obsdata, pol=pol,**kwargs)
     elif dtype in ['rrll','llrr','rlrr','rlll','lrrr','lrll']:
         (data, sigma, uv, jonesdict) = chisqdata_fracpol(Obsdata,dtype[:2],dtype[2:],jonesdict=jonesdict)
+    elif dtype == 'polclosure':
+        (data, sigma, uv, jonesdict) = chisqdata_polclosure(Obsdata,jonesdict=jonesdict)
 
     return (data, sigma, uv, jonesdict)
 
@@ -1841,6 +1849,45 @@ def chisqgrad_fracpol(upper, lower, model, uv, mvis, msigma, fit_pol=False, fit_
     grad    = ( grad_upper * samp_lower - grad_lower * samp_upper)/samp_lower**2
 
     return -np.real(np.dot(grad.conj(), wdiff))/len(mvis)
+
+def chisq_polclosure(model, uv, vis, sigma, jonesdict=None):
+    """Polarimetric ratio chi-squared
+    """
+
+    RL = model.sample_uv(uv[:,0],uv[:,1],pol='RL',jonesdict=jonesdict)
+    LR = model.sample_uv(uv[:,0],uv[:,1],pol='LR',jonesdict=jonesdict)
+    RR = model.sample_uv(uv[:,0],uv[:,1],pol='RR',jonesdict=jonesdict)
+    LL = model.sample_uv(uv[:,0],uv[:,1],pol='LL',jonesdict=jonesdict)
+    samples = (RL * LR)/(RR * LL)
+
+    return np.sum(np.abs((vis - samples))**2/(sigma**2)) / (2*len(vis))   
+
+def chisqgrad_polclosure(model, uv, vis, sigma, fit_pol=False, fit_cpol=False, fit_leakage=False, jonesdict=None):
+    """The gradient of the polarimetric ratio chisq
+    """
+
+    RL = model.sample_uv(uv[:,0],uv[:,1],pol='RL',jonesdict=jonesdict)
+    LR = model.sample_uv(uv[:,0],uv[:,1],pol='LR',jonesdict=jonesdict)
+    RR = model.sample_uv(uv[:,0],uv[:,1],pol='RR',jonesdict=jonesdict)
+    LL = model.sample_uv(uv[:,0],uv[:,1],pol='LL',jonesdict=jonesdict)
+
+    dRL = model.sample_grad_uv(uv[:,0],uv[:,1],pol='RL',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+    dLR = model.sample_grad_uv(uv[:,0],uv[:,1],pol='LR',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+    dRR = model.sample_grad_uv(uv[:,0],uv[:,1],pol='RR',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+    dLL = model.sample_grad_uv(uv[:,0],uv[:,1],pol='LL',fit_pol=fit_pol,fit_cpol=fit_cpol,fit_leakage=fit_leakage,jonesdict=jonesdict)
+
+    samples = (RL * LR)/(RR * LL)
+    wdiff   = (vis - samples)/(sigma**2)
+
+    # Get the gradient from the quotient rule
+    samp_upper = RL * LR
+    samp_lower = RR * LL
+    grad_upper = RL * dLR + dRL * LR
+    grad_lower = RR * dLL + dRR * LL
+    grad    = ( grad_upper * samp_lower - grad_lower * samp_upper)/samp_lower**2
+
+    return -np.real(np.dot(grad.conj(), wdiff))/len(vis)
+
 
 ##################################################################################################
 # Chi^2 Data functions
@@ -2297,3 +2344,24 @@ def chisqdata_fracpol(Obsdata, pol_upper,pol_lower,**kwargs):
     jonesdict = make_jonesdict(Obsdata, data_arr[mask])
 
     return ((upper/lower)[mask], sig[mask], uv[mask], jonesdict)
+
+def chisqdata_polclosure(Obsdata, **kwargs):
+    debias = kwargs.get('debias',True)
+    data_arr = Obsdata.unpack(['t1','t2','u','v','m','msigma','el1','el2','par_ang1','par_ang2','rrvis','rlvis','lrvis','llvis','rramp','rlamp','lramp','llamp','rrsigma','rlsigma','lrsigma','llsigma'], conj=False, debias=True)
+    uv = np.hstack((data_arr['u'].reshape(-1,1), data_arr['v'].reshape(-1,1)))
+
+    RL = data_arr['rlvis']
+    LR = data_arr['lrvis']
+    RR = data_arr['rrvis']
+    LL = data_arr['llvis']
+    vis = (RL * LR)/(RR * LL)
+    sig = (np.abs(LR/(LL*RR) * data_arr['rlsigma'])**2
+          +np.abs(RL/(LL*RR) * data_arr['lrsigma'])**2
+          +np.abs(LR*RL/(RR**2*LL) * data_arr['rrsigma'])**2
+          +np.abs(RL*LR/(LL**2*RR) * data_arr['llsigma'])**2)**0.5
+
+    # Mask bad data
+    mask = np.isfinite(vis + sig) # don't include nan (missing data) or inf (division by zero)
+    jonesdict = make_jonesdict(Obsdata, data_arr[mask])
+
+    return (vis[mask], sig[mask], uv[mask], jonesdict)
