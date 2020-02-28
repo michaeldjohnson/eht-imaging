@@ -273,6 +273,40 @@ def transform_grad_param(x, x_prior):
 ##################################################################################################
 # Helper functions
 ##################################################################################################
+def shrink_prior(prior, model, shrink=0.1):
+    """Shrink a specified prior volume by centering on a specified fitted model
+
+       Args:
+           prior (list): Model prior (list of dictionaries, one per model component)
+           model (Model): Model to draw central values from
+           shrink (float): Factor to shrink each prior width by
+
+       Returns:
+           prior (list): Model prior with restricted volume
+    """ 
+
+    prior_shrunk = copy.deepcopy(prior)
+    f = 1.0
+
+    #TODO: this doesn't work for beta lists yet!
+
+    for j in range(len(prior_shrunk)):
+        for key in prior_shrunk[j].keys():
+            if prior_shrunk[j][key]['prior_type'] == 'flat':
+                x = model.params[j][key]
+                w = prior_shrunk[j][key]['max'] - prior_shrunk[j][key]['min']
+                prior_shrunk[j][key]['min'] = x - w/2
+                prior_shrunk[j][key]['max'] = x + w/2
+                if prior_shrunk[j][key]['min'] < prior[j][key]['min']: prior_shrunk[j][key]['min'] = prior[j][key]['min']
+                if prior_shrunk[j][key]['max'] > prior[j][key]['max']: prior_shrunk[j][key]['max'] = prior[j][key]['max']
+                f *= (prior_shrunk[j][key]['max'] - prior_shrunk[j][key]['min'])/w
+            else:
+                pass
+
+    print('(New Prior Volume)/(Original Prior Volume:',f)
+
+    return prior_shrunk
+
 def selfcal(Obsdata, model,
             gain_init=None, gain_prior=None,
             minimizer_func='scipy.optimize.minimize', minimizer_kwargs=None,
@@ -332,7 +366,7 @@ def make_param_map(model_init, model_prior, minimizer_func, fit_model, fit_pol=F
                 if len(param_type.split('_')) == 2 and param_type not in PARAM_DETAILS:
                     param_type = param_type.split('_')[1]
                 try:
-                    if model_prior[j][param].get('transform','') == 'cdf' or minimizer_func in ['dynesty_static','dynesty_dynamic']:
+                    if model_prior[j][param].get('transform','') == 'cdf' or minimizer_func in ['dynesty_static','dynesty_dynamic','pymc3']:
                         param_map.append([j,param,1,PARAM_DETAILS[param_type][1],PARAM_DETAILS[param_type][0]])
                     else:
                         param_map.append([j,param,PARAM_DETAILS[param_type][0],PARAM_DETAILS[param_type][1],PARAM_DETAILS[param_type][0]])
@@ -509,10 +543,10 @@ def prior_gain_grad(gains, gain_list, gain_prior, fit_gains):
         return []
 
 def transform_params(params, param_map, minimizer_func, model_prior, inverse=True):
-    if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+    if minimizer_func not in ['dynesty_static','dynesty_dynamic','pymc3']:
         return [transform_param(params[j], model_prior[param_map[j][0]][param_map[j][1]], inverse=inverse) for j in range(len(params))]
     else:
-        # For dynesty, over-ride all specified parameter transformations to assume CDF
+        # For dynesty or pymc3, over-ride all specified parameter transformations to assume CDF mapping to the hypercube
         # However, the passed parameters to the objective function and gradient are *not* transformed (i.e., they are not in the hypercube), thus the transformation does not need to be inverted
         return params
 
@@ -690,7 +724,8 @@ def objfunc(params, force_posterior=False):
     if globdict['marginalize_gains']:
         # Ugh, the use of global variables totally messes this up
         _globdict = globdict
-        globdict['gain_init'] = caltable_to_gains(selfcal(globdict['Obsdata'], globdict['trial_model'], gain_init=globdict['gain_init'], gain_prior=globdict['gain_prior'], msgtype='none'),globdict['gain_list'])
+        # This doesn't handle the passed gain_init properly because the dimensions are incorrect
+        _globdict['gain_init'] = caltable_to_gains(selfcal(globdict['Obsdata'], globdict['trial_model'], gain_init=None, gain_prior=globdict['gain_prior'], msgtype='none'),globdict['gain_list'])
         globdict = _globdict
 
     (chi2_1, chi2_2, chi2_3) = chisq_list(gains)
@@ -702,7 +737,7 @@ def objfunc(params, force_posterior=False):
         (l1, l2, l3) = laplace_list()
         datterm += l1 + l2 + l3
 
-    if (globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']) or force_posterior:
+    if (globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic','pymc3']) or force_posterior:
         priterm  = prior(params[:globdict['n_params']], globdict['param_map'], globdict['model_prior'], globdict['minimizer_func']) 
         priterm += prior_gain(params[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])], globdict['gain_list'], globdict['gain_prior'], globdict['fit_gains'])
         priterm += prior_leakage(params[(globdict['n_params'] + globdict['n_gains']):], globdict['leakage_fit'], globdict['leakage_prior'], globdict['fit_leakage'])
@@ -723,7 +758,7 @@ def objgrad(params):
                + globdict['alpha_d2'] * chisqgrad_wgain(globdict['trial_model'], globdict['d2'], globdict['data2'], globdict['uv2'], globdict['sigma2'], globdict['jonesdict2'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol'], globdict['fit_leakage']) 
                + globdict['alpha_d3'] * chisqgrad_wgain(globdict['trial_model'], globdict['d3'], globdict['data3'], globdict['uv3'], globdict['sigma3'], globdict['jonesdict3'], gains, globdict['gains_t1'], globdict['gains_t2'], globdict['fit_gains'] + globdict['marginalize_gains'], globdict['param_mask'], globdict['fit_pol'], globdict['fit_cpol'], globdict['fit_leakage']))
 
-    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
+    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic','pymc3']:
         priterm  = np.concatenate([prior_grad(params[:globdict['n_params']], globdict['param_map'], 
                                               globdict['model_prior'], globdict['minimizer_func']), 
                                   prior_gain_grad(params[globdict['n_params']:(globdict['n_params'] + globdict['n_gains'])], 
@@ -736,11 +771,11 @@ def objgrad(params):
 
     grad = datterm - priterm + fluxterm
 
-    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic']:
+    if globdict['minimizer_func'] not in ['dynesty_static','dynesty_dynamic','pymc3']:
         for j in range(globdict['n_params']):
             grad[j] *= globdict['param_map'][j][2] * transform_grad_param(params[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]])
     else:
-        # For dynesty, over-ride all specified parameter transformations to assume CDF
+        # For dynesty or pymc3, over-ride all specified parameter transformations to assume CDF
         # However, the passed parameters are *not* transformed (i.e., they are not in the hypercube)
         # The Jacobian still needs to account for the parameter transformation
         for j in range(len(params)):
@@ -829,6 +864,7 @@ def modeler_func(Obsdata, model_init, model_prior,
                                 'scipy.optimize.basinhopping'
                                 'dynesty_static'
                                 'dynesty_dynamic'
+                                'pymc3'
            minimizer_kwargs (dict): kwargs passed to the minimizer. 
 
            bounds (list): List of parameter bounds for the fitted parameters (will automatically compute if needed)
@@ -960,10 +996,11 @@ def modeler_func(Obsdata, model_init, model_prior,
             if not quiet: print('Converting gain_init from caltable to a list')
             gain_init = caltable_to_gains(gain_init, gain_list)
         if gain_init is None:
+            if not quiet: print('Initializing all gain corrections to be zero')
             gain_init = np.zeros(len(gain_list))
         else:
             if len(gain_init) != len(gain_list):
-                raise Exception('Gain initialization has incorrect dimensions!')
+                raise Exception('Gain initialization has incorrect dimensions! %d %d' % (len(gain_init), len(gain_list)))
         if fit_gains:
             n_gains = len(gain_list)
         elif marginalize_gains:
@@ -1027,8 +1064,8 @@ def modeler_func(Obsdata, model_init, model_prior,
     if fit_leakage:
         param_init += list(leakage_init)
  
-    if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
-        # Define bounds (irrelevant for dynesty)
+    if minimizer_func not in ['dynesty_static','dynesty_dynamic','pymc3']:
+        # Define bounds (irrelevant for dynesty or pymc3)
         if use_bounds == False and minimizer_func in ['scipy.optimize.dual_annealing']:
             if not quiet: print('Bounds are required for ' + minimizer_func + '! Setting use_bounds=True.')
             use_bounds = True
@@ -1128,7 +1165,182 @@ def modeler_func(Obsdata, model_init, model_prior,
             min_kwargs[key] = minimizer_kwargs[key]
 
         res = opt.basinhopping(objfunc, param_init, **min_kwargs)  
+    elif minimizer_func == 'pymc3':
+        ########################
+        ## Sample using pymc3 ##
+        ########################
+        import pymc3 as pm
+        import theano
+        import theano.tensor as tt
+
+        # To simplfy things, we'll use cdf transforms to map everything to a hypercube, as in dynesty
+
+        # First, define a theano Op for our likelihood function
+        # This is based on the example here: https://docs.pymc.io/notebooks/blackbox_external_likelihood.html
+        class LogLike(tt.Op):
+            itypes = [tt.dvector] # expects a vector of parameter values when called
+            otypes = [tt.dscalar] # outputs a single scalar value (the log likelihood)
+
+            def __init__(self, objfunc, objgrad):
+                # add inputs as class attributes
+                self.objfunc = objfunc
+                self.objgrad = objgrad
+                self.logpgrad = LogLikeGrad(objfunc, objgrad)
+
+            def prior_transform(self, u):
+                # This function transforms samples from the unit hypercube (u) to the target prior (x)
+                global globdict  
+                cparts = ['re','im']
+                model_params_u   = u[:n_params]    
+                gain_params_u    = u[n_params:(n_params+n_gains)]
+                leakage_params_u = u[(n_params+n_gains):]
+                model_params_x   = [cdf_inverse(  model_params_u[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]]) for j in range(len(model_params_u))]
+                gain_params_x    = [cdf_inverse(   gain_params_u[j], globdict['gain_prior'][globdict['gain_list'][j][1]]) for j in range(len(gain_params_u))]
+                leakage_params_x = [cdf_inverse(leakage_params_u[j], globdict['leakage_prior'][globdict['leakage_fit'][j//2][0]][leakage_fit[j//2][1]][cparts[j%2]]) for j in range(len(leakage_params_u))]
+                return np.concatenate([model_params_x, gain_params_x, leakage_params_x])
+
+            def perform(self, node, inputs, outputs):
+                # the method that is used when calling the Op
+                theta, = inputs  # this will contain my variables
+                # Transform from the hypercube to the prior
+                x = self.prior_transform(theta)
+
+                # call the log-likelihood function
+                logl = -self.objfunc(x)
+
+                outputs[0][0] = np.array(logl) # output the log-likelihood
+
+            def grad(self, inputs, g):
+                # the method that calculates the vector-Jacobian product
+                # http://deeplearning.net/software/theano_versions/dev/extending/op.html#grad
+                theta, = inputs 
+                return [g[0]*self.logpgrad(theta)]
+
+        class LogLikeGrad(tt.Op):
+            """
+            This Op will be called with a vector of values and also return a vector of
+            values - the gradients in each dimension.
+            """
+            itypes = [tt.dvector]
+            otypes = [tt.dvector]
+
+            def __init__(self, objfunc, objgrad):
+                self.objfunc = objfunc
+                self.objgrad = objgrad
+
+            def prior_transform(self, u):
+                # This function transforms samples from the unit hypercube (u) to the target prior (x)
+                global globdict  
+                cparts = ['re','im']
+                model_params_u   = u[:n_params]    
+                gain_params_u    = u[n_params:(n_params+n_gains)]
+                leakage_params_u = u[(n_params+n_gains):]
+                model_params_x   = [cdf_inverse(  model_params_u[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]]) for j in range(len(model_params_u))]
+                gain_params_x    = [cdf_inverse(   gain_params_u[j], globdict['gain_prior'][globdict['gain_list'][j][1]]) for j in range(len(gain_params_u))]
+                leakage_params_x = [cdf_inverse(leakage_params_u[j], globdict['leakage_prior'][globdict['leakage_fit'][j//2][0]][leakage_fit[j//2][1]][cparts[j%2]]) for j in range(len(leakage_params_u))]
+                return np.concatenate([model_params_x, gain_params_x, leakage_params_x])
+
+            def perform(self, node, inputs, outputs):
+                theta, = inputs
+                x = self.prior_transform(theta)
+                outputs[0][0] = -self.objgrad(x)
+
+        # create the log-likelihood Op
+        logl = LogLike(objfunc, objgrad)
+
+        # Define the sampler keywords
+        min_kwargs = {}
+        for key in minimizer_kwargs.keys():
+            min_kwargs[key] = minimizer_kwargs[key]
+
+        # Define the initial value
+        cparts = ['re','im']
+        model_params_x   = param_init[:n_params]    
+        gain_params_x    = param_init[n_params:(n_params+n_gains)]
+        leakage_params_x = param_init[(n_params+n_gains):]
+        model_params_u   = [cdf(  model_params_x[j], globdict['model_prior'][globdict['param_map'][j][0]][globdict['param_map'][j][1]]) for j in range(len(model_params_x))]
+        gain_params_u    = [cdf(   gain_params_x[j], globdict['gain_prior'][globdict['gain_list'][j][1]]) for j in range(len(gain_params_x))]
+        leakage_params_u = [cdf(leakage_params_x[j], globdict['leakage_prior'][globdict['leakage_fit'][j//2][0]][leakage_fit[j//2][1]][cparts[j%2]]) for j in range(len(leakage_params_x))]
+        param_init_u = np.concatenate([model_params_u, gain_params_u, leakage_params_u])
+        start = {}
+        for j in range(len(param_init)):
+            start['var' + str(j)] = param_init_u[j]
+
+        # Setup the sampler
+        with pm.Model() as model:
+            theta = tt.as_tensor_variable([ pm.Uniform('var' + str(j), lower=0., upper=1.) for j in range(len(param_init)) ])
+            pm.DensityDist('likelihood', lambda v: logl(v), observed={'v': theta})
+#            print('Finding the MAP as a quick sanity check...')
+#            MAP = pm.find_MAP(start=start)
+#            samples_MAP = logl.prior_transform(np.array([MAP['var' + str(j)] for j in range(len(param_init))]))
+#            samples_MAP /= np.array([_[4] for _ in param_map])   
+#            print('MAP:',samples_MAP)
+            trace = pm.sample(start=start,**min_kwargs)
+
+        # Extract useful sampling diagnostics.
+        samples_u = np.vstack([trace['var' + str(j)] for j in range(len(param_init))]).T # samples in the hypercube
+        samples = np.array([logl.prior_transform(u) for u in samples_u]) # samples 
+        mean    = np.mean(samples,axis=0)
+        var     = np.var(samples,axis=0)
+
+        # Compute the log-posterior
+        if not quiet: print('Calculating the posterior values for the samples...')
+        logposterior = np.array([-objfunc(x, force_posterior=True) for x in samples])
+
+        # Select the MAP
+        j_MAP = np.argmax(logposterior)
+        MAP  = samples[j_MAP]
+
+        # Return a model determined by the MAP
+        set_params(MAP[:n_params], trial_model, param_map, minimizer_func, model_prior)                
+        gains = MAP[n_params:(n_params+n_gains)]
+        leakage = MAP[(n_params+n_gains):]
+        update_leakage(leakage)
+
+        # Return the sampler
+        ret['trace'] = trace
+        ret['mean'] = mean
+        ret['map'] = MAP
+        ret['std']  = var**0.5
+        ret['samples'] = samples
+        ret['logposterior'] = logposterior
+
+        # Return a set of models from the posterior
+        posterior_models = []
+        for j in range(N_POSTERIOR_SAMPLES):
+            posterior_model = trial_model.copy()
+            set_params(samples[-j][:n_params], posterior_model, param_map, minimizer_func, model_prior)  
+            posterior_models.append(posterior_model)   
+        ret['posterior_models'] = posterior_models    
+
+        # Return data that has been rescaled based on 'natural' units for each parameter
+        import copy
+        samples_natural = copy.deepcopy(samples)
+        samples_natural[:,:n_params] /= np.array([_[4] for _ in param_map])    
+        ret['samples_natural'] = samples_natural
+
+        # Return the names of the fitted parameters
+        labels = []
+        labels_natural = []
+        for _ in param_map:
+            labels.append(_[1].replace('_','-'))
+            labels_natural.append(_[1].replace('_','-'))
+            if _[3] != '':
+                labels_natural[-1] += ' (' + _[3] + ')'
+        for _ in gain_list:
+            labels.append(str(_[0]) + ' ' + _[1])
+            labels_natural.append(str(_[0]) + ' ' + _[1])
+        for _ in leakage_fit:
+            for coord in ['re','im']:
+                labels.append(_[0] + ',' + _[1] + ',' + coord)
+                labels_natural.append(_[0] + ',' + _[1] + ',' + coord)
+
+        ret['labels'] = labels
+        ret['labels_natural'] = labels_natural
     elif minimizer_func in ['dynesty_static','dynesty_dynamic']:
+        ##########################
+        ## Sample using dynesty ##
+        ##########################
         import dynesty
         from dynesty import utils as dyfunc
         # Define the functions that dynesty requires
@@ -1179,10 +1391,6 @@ def modeler_func(Obsdata, model_init, model_prior,
         # Run the sampler
         sampler.run_nested(**run_nested_kwargs)
 
-        # Close the pool (this may not be the desired behavior if the sampling is to be iterative!)
-        if pool is not None:
-            pool.close()
-
         # Print the sampler summary
         res = sampler.results
         if not quiet: 
@@ -1196,7 +1404,18 @@ def modeler_func(Obsdata, model_init, model_prior,
 
         # Compute the log-posterior
         if not quiet: print('Calculating the posterior values for the samples...')
-        logposterior = np.array([-objfunc(x, force_posterior=True) for x in samples])
+        if pool is not None:
+            from functools import partial
+            def logpost(j):
+                return -objfunc(samples[j], force_posterior=True)
+
+            logposterior = pool.map(logpost, range(len(samples)))
+        else:
+            logposterior = np.array([-objfunc(x, force_posterior=True) for x in samples])
+
+        # Close the pool (this may not be the desired behavior if the sampling is to be iterative!)
+        if pool is not None:
+            pool.close()
 
         # Select the MAP
         j_MAP = np.argmax(logposterior)
@@ -1231,7 +1450,9 @@ def modeler_func(Obsdata, model_init, model_prior,
         import copy
         res_natural = copy.deepcopy(res)
         res_natural.samples[:,:n_params] /= np.array([_[4] for _ in param_map])    
+        samples_natural = samples[:,:n_params]/np.array([_[4] for _ in param_map])    
         ret['res_natural'] = res_natural
+        ret['samples_natural'] = samples_natural
 
         # Return the names of the fitted parameters
         labels = []
@@ -1242,8 +1463,8 @@ def modeler_func(Obsdata, model_init, model_prior,
             if _[3] != '':
                 labels_natural[-1] += ' (' + _[3] + ')'
         for _ in gain_list:
-            labels.append(_[0] + ' ' + _[1])
-            labels_natural.append(_[0] + ' ' + _[1])
+            labels.append(str(_[0]) + ' ' + _[1])
+            labels_natural.append(str(_[0]) + ' ' + _[1])
         for _ in leakage_fit:
             for coord in ['re','im']:
                 labels.append(_[0] + ',' + _[1] + ',' + coord)
@@ -1261,7 +1482,7 @@ def modeler_func(Obsdata, model_init, model_prior,
     if not quiet: 
         print("\ntime: %f s" % (tstop - tstart))
         print("\nFitted Parameters:")
-    if minimizer_func not in ['dynesty_static','dynesty_dynamic']:
+    if minimizer_func not in ['dynesty_static','dynesty_dynamic','pymc3']:
         out = res.x
         set_params(out[:n_params], trial_model, param_map, minimizer_func, model_prior)
         gains = out[n_params:(n_params + n_gains)]
@@ -1297,7 +1518,7 @@ def modeler_func(Obsdata, model_init, model_prior,
                     if param_map[j][0] != cur_idx:
                         cur_idx = param_map[j][0]
                         print(model_init.models[cur_idx] + ' (component %d/%d):' % (cur_idx+1,model_init.N_models()))
-                    print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (mean[j] * param_map[j][2]/param_map[j][4],cov[j,j]**0.5 * param_map[j][2]/param_map[j][4]))
+                    print(('\t' + param_map[j][1] + ': %f +/- %f ' + param_map[j][3]) % (ret['mean'][j] * param_map[j][2]/param_map[j][4], ret['std'][j] * param_map[j][2]/param_map[j][4]))
                 print('\n')
 
             if len(leakage_fit):
@@ -1311,9 +1532,10 @@ def modeler_func(Obsdata, model_init, model_prior,
 
     # Return fitted model
     ret['model']     = trial_model
-    ret['res']       = res
     ret['param_map'] = param_map    
     ret['chisq_list'] = chisq_list(gains)
+    try: ret['res'] = res
+    except: pass
 
     if fit_gains:
         ret['gains'] = gains

@@ -57,8 +57,8 @@ def model_params(model_type, model_params=None, fit_pol=False, fit_cpol=False):
                 params.append('cpol_frac')
             else:
                 for j in range(len(model_params['beta_list_cpol'])):
-                    params.append('betacpol' + str(j+1) + complex_labels[0])
-                    params.append('betacpol' + str(j+1) + complex_labels[1])
+                    params.append('betacpol' + str(j) + complex_labels[0])
+                    params.append('betacpol' + str(j) + complex_labels[1])
 
     if model_type == 'point':
         params = ['F0','x0','y0']
@@ -71,6 +71,9 @@ def model_params(model_type, model_params=None, fit_pol=False, fit_cpol=False):
         add_pol()
     elif model_type == 'disk':
         params = ['F0','d','x0','y0']
+        add_pol()
+    elif model_type == 'blurred_disk':
+        params = ['F0','d','alpha','x0','y0']
         add_pol()
     elif model_type == 'ring':
         params = ['F0','d','x0','y0']
@@ -147,6 +150,9 @@ def default_prior(model_type,model_params=None,fit_pol=False,fit_cpol=False):
         prior['PA'] = {'prior_type':'none'}
     elif model_type == 'disk':
         prior['d'] = {'prior_type':'positive','transform':'log'}
+    elif model_type == 'blurred_disk':
+        prior['d'] = {'prior_type':'positive','transform':'log'}
+        prior['alpha'] = {'prior_type':'positive','transform':'log'}
     elif model_type == 'ring':
         prior['d'] = {'prior_type':'positive','transform':'log'}
     elif model_type == 'stretched_ring':
@@ -279,6 +285,8 @@ def sample_1model_xy(x, y, model_type, params, psize=1.*RADPERUAS, pol='I'):
                np.exp(-((y - params['y0'])*np.cos(params['PA']) + (x - params['x0'])*np.sin(params['PA']))**2/(2*sigma_maj**2) +
                       -((x - params['x0'])*np.cos(params['PA']) - (y - params['y0'])*np.sin(params['PA']))**2/(2*sigma_min**2)))
     elif model_type == 'disk':
+        val = params['F0']*psize**2/(np.pi*params['d']**2/4.) * (np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2) < params['d']/2.0) 
+    elif model_type == 'blurred_disk':
         val = params['F0']*psize**2/(np.pi*params['d']**2/4.) * (np.sqrt((x - params['x0'])**2 + (y - params['y0'])**2) < params['d']/2.0) 
     elif model_type == 'ring':
         val = (params['F0']*psize**2/(np.pi*params['d']*psize*LINE_THICKNESS)
@@ -537,6 +545,17 @@ def sample_1model_graduv_uv(u, v, model_type, params, pol='I', jonesdict=None):
                             + params['F0'] * 2./z * np.pi * params['d'] * u/uvdist * bessel_deriv * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
                           (1j * 2.0 * np.pi * params['y0'] - v/uvdist**2) * vis 
                             + params['F0'] * 2./z * np.pi * params['d'] * v/uvdist * bessel_deriv * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) ])
+    elif model_type == 'blurred_disk': 
+        # Take care of the degenerate origin point by a small offset
+        u += (u==0.)*(v==0.)*1e-10
+        uvdist = (u**2 + v**2)**0.5
+        z = np.pi * params['d'] * uvdist
+        blur = np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+        bessel_deriv = 0.5 * (sps.jv( 0, z) - sps.jv( 2, z))
+        val = np.array([ (1j * 2.0 * np.pi * params['x0'] - u/uvdist**2 - params['alpha']**2 * np.pi**2 * u/(2. * np.log(2.))) * vis 
+                            + params['F0'] * 2./z * np.pi * params['d'] * u/uvdist * bessel_deriv * blur * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
+                         (1j * 2.0 * np.pi * params['y0'] - v/uvdist**2 - params['alpha']**2 * np.pi**2 * v/(2. * np.log(2.))) * vis 
+                            + params['F0'] * 2./z * np.pi * params['d'] * v/uvdist * bessel_deriv * blur * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])) ])
     elif model_type == 'ring':
         # Take care of the degenerate origin point by a small offset
         u += (u==0.)*(v==0.)*1e-10
@@ -864,6 +883,19 @@ def sample_1model_grad_uv(u, v, model_type, params, pol='I', fit_pol=False, fit_
         val = np.array([ 1.0/params['F0'] * vis,
                          -(params['F0'] * 2.0/z * sps.jv(2, z) * np.pi * (u**2 + v**2)**0.5 * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) ,
                           1j * 2.0 * np.pi * u * vis,
+                          1j * 2.0 * np.pi * v * vis]) 
+    elif model_type == 'blurred_disk': # F0, d, alpha, x0, y0
+        z = np.pi * params['d'] * (u**2 + v**2)**0.5
+        #Add a small offset to avoid issues with division by zero
+        z += (z == 0.0) * 1e-10
+        blur = np.exp(-(np.pi * params['alpha'] * (u**2 + v**2)**0.5)**2/(4. * np.log(2.)))
+        vis = (params['F0'] * 2.0/z * sps.jv(1, z) 
+               * blur
+               * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0']))) 
+        val = np.array([ 1.0/params['F0'] * vis,
+                         -params['F0'] * 2.0/z * sps.jv(2, z) * np.pi * (u**2 + v**2)**0.5 * blur * np.exp(1j * 2.0 * np.pi * (u * params['x0'] + v * params['y0'])),
+                         -np.pi**2 * (u**2 + v**2) * params['alpha']/(2.*np.log(2.)) * vis,
+                          1j * 2.0 * np.pi * u * vis,
                           1j * 2.0 * np.pi * v * vis])    
     elif model_type == 'ring': # F0, d, x0, y0
         z = np.pi * params['d'] * (u**2 + v**2)**0.5
@@ -1058,8 +1090,11 @@ def blur_circ_1model(model_type, params, fwhm):
     elif model_type == 'gauss':
         params_blur['FWHM_maj'] = (params_blur['FWHM_maj']**2 + fwhm**2)**0.5
         params_blur['FWHM_min'] = (params_blur['FWHM_min']**2 + fwhm**2)**0.5
-    elif 'thick' in model_type:
+    elif 'thick' in model_type or 'blurred' in model_type:
         params_blur['alpha'] = (params_blur['alpha']**2 + fwhm**2)**0.5
+    elif model_type == 'disk':
+        model_type_blur = 'blurred_' + model_type
+        params_blur['alpha'] = fwhm
     elif model_type == 'ring' or model_type == 'mring':
         model_type_blur = 'thick_' + model_type
         params_blur['alpha'] = fwhm
@@ -1263,6 +1298,24 @@ class Model(object):
         out = self.copy()
         out.models.append('disk')
         out.params.append({'F0':F0,'d':d,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
+        return out
+
+    def add_blurred_disk(self, F0 = 1.0, d = 50.*RADPERUAS, alpha = 10.*RADPERUAS, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
+        """Add a circular disk model that is blurred with a circular Gaussian kernel.
+
+           Args:
+               F0 (float): The total flux of the disk (Jy)
+               d (float): The diameter (radians)
+               alpha (float): The blurring (FWHM of Gaussian convolution) (radians)
+               x0 (float): The x-coordinate (radians)
+               y0 (float): The y-coordinate (radians)
+
+           Returns:
+                (Model): Updated Model
+        """
+        out = self.copy()
+        out.models.append('blurred_disk')
+        out.params.append({'F0':F0,'d':d,'alpha':alpha,'x0':x0,'y0':y0,'pol_frac':pol_frac,'pol_evpa':pol_evpa,'cpol_frac':cpol_frac})
         return out
 
     def add_ring(self, F0 = 1.0, d = 50.*RADPERUAS, x0 = 0.0, y0 = 0.0, pol_frac = 0.0, pol_evpa = 0.0, cpol_frac = 0.0):
@@ -1827,7 +1880,7 @@ class Model(object):
         out = []
         for j in range(self.N_models()):
             out.append(self.models[j])
-            out.append(str(self.params[j]))
+            out.append(str(self.params[j]).replace('\n','').replace('complex128','np.complex128').replace('array','np.array'))
         np.savetxt(filename, out, header=head, fmt="%s")
 
     def load_txt(self,filename):
