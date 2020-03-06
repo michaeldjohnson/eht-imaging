@@ -668,6 +668,7 @@ def save_obs_uvfits(obs, fname, force_singlepol=None, polrep_out='circ'):
     #rdate_offset_out = 0.e0
     rdate_tt_new = Time(obs.mjd + MJD_0, format='jd', scale='utc', out_subfmt='date')
     rdate_out = rdate_tt_new.iso
+    rdate_tt_new.out_subfmt = 'float'
     rdate_jd_out = rdate_tt_new.jd
     rdate_gstiao_out = rdate_tt_new.sidereal_time('apparent','greenwich').degree
     rdate_offset_out = (rdate_tt_new.ut1.datetime.second - rdate_tt_new.utc.datetime.second)
