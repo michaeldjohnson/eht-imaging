@@ -43,6 +43,7 @@ import ehtim.io.oifits
 from astropy.time import Time
 from ehtim.const_def import *
 from ehtim.observing.obs_helpers import *
+from astropy.coordinates import solar_system_ephemeris
 
 import warnings
 warnings.filterwarnings("ignore", message="Mean of empty slice")
@@ -776,7 +777,14 @@ def load_array_txt(filename, ephemdir='ephemeris'):
                 edata[sitename] = np.loadtxt(ephempath, dtype=bytes, comments='#', delimiter='/').astype(str)
                 print('loaded spacecraft ephemeris %s' % ephempath)
             except IOError:
-                raise Exception ('no ephemeris file %s !' % ephempath)
+                if sitename in solar_system_ephemeris.bodies:
+                    edata[sitename] = -1
+                    print("Using solar system ephemeris")
+                elif sitename in SSLOCS:
+                    edata[sitename] = -2
+                    print("Using location computed from solar system ephemeris")
+                else:
+                    raise Exception ('no ephemeris file %s or not a recognized object! ' % ephempath)
 
     return ehtim.array.Array(tdataout, ephem=edata)
 

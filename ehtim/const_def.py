@@ -196,6 +196,9 @@ SCOLORS = [(0.11764705882352941, 0.5647058823529412, 1.0),
            (0.8235294117647058, 0.7058823529411765, 0.5490196078431373),
            (0.0, 0.0, 0.0)]
 
+#Supported solar system location names that are not in the astropy builtin ephemeris
+SSLOCS = ['EML1','EML2',
+          'SEL1','SEL2']
 
 #miscellaneous functions
 #TODO this makes a copy -- is there a faster robust way?

@@ -42,6 +42,7 @@ import os
 import ehtim.const_def
 from ehtim.const_def import *
 import scipy.ndimage as nd
+from ehtim.observing.sslocs_helpers import EARTHCORE, FUNCDICT
 
 
 
@@ -85,6 +86,7 @@ def compute_uv_coordinates(array, site1, site2, time, mjd, ra, dec, rf, timetype
     else: raise Exception("timetype must be UTC or GMST!")
 
     fracmjd = np.floor(mjd) + time/24.
+    Times = at.Time(fracmjd, format='mjd')
     dto = (at.Time(fracmjd, format='mjd')).datetime
     theta = np.mod((time_sidereal - ra)*HOUR, 2*np.pi)
     if type(fix_theta_GMST) != bool:
@@ -105,21 +107,37 @@ def compute_uv_coordinates(array, site1, site2, time, mjd, ra, dec, rf, timetype
 
         site1space_list = site1[spacemask1]
         site1space_dtolist = dto[spacemask1]
+        site1space_Times = Times[spacemask1]
+        site1space_fracmjds = fracmjd[spacemask1]
+        site1space_thetas = theta[spacemask1]
         coord1space = []
         for k in range(len(site1space_list)):
             site1space = site1space_list[k]
             dto_now = site1space_dtolist[k]
-            sat = ephem.readtle(array.ephem[site1space][0],array.ephem[site1space][1],array.ephem[site1space][2])
-            sat.compute(dto_now) # often complains if ephemeris out of date!
-            elev = sat.elevation
-            lat = sat.sublat / DEGREE
-            lon = sat.sublong / DEGREE
-            # pyephem doesn't use an ellipsoid earth model!
-            c1 = coords.EarthLocation.from_geodetic(lon, lat, elev, ellipsoid=None)
-            c1 = np.array((c1.x.value, c1.y.value, c1.z.value))
+            theta_now = site1space_thetas[k]
+            Time_now = at.Time(site1space_fracmjds[k],format='mjd')
+            #if expecting a TLE
+            if type(array.ephem[site1space]) != int:
+                sat = ephem.readtle(array.ephem[site1space][0],array.ephem[site1space][1],array.ephem[site1space][2])
+                sat.compute(dto_now) # often complains if ephemeris out of date!
+                elev = sat.elevation
+                lat = sat.sublat / DEGREE
+                lon = sat.sublong / DEGREE
+                # pyephem doesn't use an ellipsoid earth model!
+                c1 = coords.EarthLocation.from_geodetic(lon, lat, elev, ellipsoid=None)
+                c1 = np.array((c1.x.value, c1.y.value, c1.z.value))
+                # c1 = earthrot(np.array([c1]),theta_now)[0]
+            #if using an astropy solar system body
+            elif array.ephem[site1space] == -1:
+                sat = coords.get_body(site1space, Time_now, EARTHCORE)
+                c1 = sat.represent_as('cartesian')
+                c1 = np.array((c1.x.to_value(units.m), c1.y.to_value(units.m), c1.z.to_value(units.m)))
+                # print(c1)
+            #if using a supported custom object in SSLOCS
+            else:
+                c1 = np.array(FUNCDICT[site1space](Time_now))
             coord1space.append(c1)
         coord1space = np.array(coord1space)
-        coord1[spacemask1] = coord1space
 
     # use spacecraft ephemeris to get position of site 2
     spacemask2 = [np.all(coord == (0.,0.,0.)) for coord in coord2]
@@ -129,25 +147,49 @@ def compute_uv_coordinates(array, site1, site2, time, mjd, ra, dec, rf, timetype
 
         site2space_list = site2[spacemask2]
         site2space_dtolist = dto[spacemask2]
+        site2space_Times = Times[spacemask2]
+        site2space_fracmjds = fracmjd[spacemask2]
+        site2space_thetas = theta[spacemask2]
         coord2space = []
         for k in range(len(site2space_list)):
             site2space = site2space_list[k]
             dto_now = site2space_dtolist[k]
-            sat = ephem.readtle(array.ephem[site2space][0],array.ephem[site2space][1],array.ephem[site2space][2])
-            sat.compute(dto_now) # often complains if ephemeris out of date!
-            elev = sat.elevation
-            lat = sat.sublat / DEGREE
-            lon = sat.sublong / DEGREE
-            # pyephem doesn't use an ellipsoid earth model!
-            c2 = coords.EarthLocation.from_geodetic(lon, lat, elev, ellipsoid=None)
-            c2 = np.array((c2.x.value, c2.y.value, c2.z.value))
+            theta_now = site2space_thetas[k]
+            Time_now = at.Time(site2space_fracmjds[k],format='mjd')
+            #if expecting a TLE
+            if type(array.ephem[site2space]) != int:
+                sat = ephem.readtle(array.ephem[site2space][0],array.ephem[site2space][1],array.ephem[site2space][2])
+                sat.compute(dto_now) # often complains if ephemeris out of date!
+                elev = sat.elevation
+                lat = sat.sublat / DEGREE
+                lon = sat.sublong / DEGREE
+                # pyephem doesn't use an ellipsoid earth model!
+                c2 = coords.EarthLocation.from_geodetic(lon, lat, elev, ellipsoid=None)
+                c2 = np.array((c2.x.value, c2.y.value, c2.z.value))
+                #pre-rotate Earth-orbiters
+                # c2 = earthrot(np.array([c2]),theta_now)[0]
+                
+            #if using an astropy solar system body
+            elif array.ephem[site2space] == -1:
+                sat = coords.get_body(site2space, Time_now, EARTHCORE)
+                c2 = sat.represent_as('cartesian')
+                c2 = np.array((c2.x.to_value(units.m), c2.y.to_value(units.m), c2.z.to_value(units.m)))
+                # print(c2)
+            #if using a supported custom object in SSLOCS
+            else:
+                c2 = np.array(FUNCDICT[site2space](Time_now))
             coord2space.append(c2)
         coord2space = np.array(coord2space)
-        coord2[spacemask2] = coord2space
 
     # rotate the station coordinates with the earth
     coord1 = earthrot(coord1, theta)
     coord2 = earthrot(coord2, theta)
+
+    #substitute in space coordinates
+    if np.any(spacemask1):
+        coord1[spacemask1] = np.array(coord1space)
+    if np.any(spacemask2):
+        coord2[spacemask2] = np.array(coord2space)
 
     # u,v coordinates
     u = np.dot((coord1 - coord2)/l, projU) # u (lambda)
