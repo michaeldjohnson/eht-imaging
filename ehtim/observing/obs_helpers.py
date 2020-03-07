@@ -32,6 +32,7 @@ except ImportError:
 
 import astropy.time as at
 import astropy.coordinates as coords
+import astropy.units as units
 import numpy as np
 import scipy.special as ss
 import itertools as it
